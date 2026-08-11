@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.3 — 2026-08-12
+
+- Fix: detect Node on other drives (e.g. `E:\Program Files\Nodejs`)
+- Fix: OmniRoute login tries multiple passwords + clearer Russian error (no raw JSON)
+- Fix: always kill OmniRoute / port 20128 on FreeClaude exit (fewer orphan processes / lag)
+- Fix: more reliable CSS inlining + JS cache bust after updates
+- Release ships both `.zip` and standalone `.exe`
+
 ## 1.0.2 — 2026-08-11
 
 - Fix: detect Node.js / npm from full user PATH (nvm, scoop, custom installs) — not only `C:\Program Files\nodejs`

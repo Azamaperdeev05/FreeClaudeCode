@@ -106,12 +106,23 @@ function resolveNode() {
     if (_nodePathCache && fs.existsSync(_nodePathCache)) return _nodePathCache;
     _nodePathCache = undefined;
   }
+
+  const driveCandidates = [];
+  for (const letter of "CDEFGHIJKLMNOPQRSTUVWXYZ") {
+    for (const base of [`${letter}:\\Program Files`, `${letter}:\\Program Files (x86)`]) {
+      for (const name of ["nodejs", "Nodejs", "Node.js", "node"]) {
+        driveCandidates.push(path.join(base, name, "node.exe"));
+      }
+    }
+  }
+
   const candidates = [
     path.join(NODE_DIR_DEFAULT, "node.exe"),
     process.env.NVM_SYMLINK ? path.join(process.env.NVM_SYMLINK, "node.exe") : null,
     path.join(process.env.LOCALAPPDATA || "", "Programs", "node", "node.exe"),
     path.join(os.homedir(), "scoop", "apps", "nodejs", "current", "node.exe"),
     path.join(os.homedir(), "scoop", "apps", "nodejs-lts", "current", "node.exe"),
+    ...driveCandidates,
     whereOnPath("node.exe"),
     whereOnPath("node"),
   ].filter(Boolean);
@@ -137,6 +148,7 @@ function resolveNpm() {
   }
   const node = resolveNode();
   const besideNode = node ? path.join(path.dirname(node), "npm.cmd") : null;
+  // Prefer npm next to node.exe (E:\Program Files\Nodejs) over %APPDATA%\npm shims
   const candidates = [
     besideNode,
     path.join(NODE_DIR_DEFAULT, "npm.cmd"),
@@ -210,6 +222,56 @@ function getOmniPassword() {
   );
 }
 
+function readOmniEnvFile() {
+  const envPath = path.join(os.homedir(), ".omniroute", ".env");
+  const out = {};
+  try {
+    const raw = fs.readFileSync(envPath, "utf8");
+    for (const line of raw.split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t || t.startsWith("#")) continue;
+      const i = t.indexOf("=");
+      if (i < 1) continue;
+      const k = t.slice(0, i).trim();
+      let v = t.slice(i + 1).trim();
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+      out[k] = v;
+    }
+  } catch {
+    /* no .env */
+  }
+  return out;
+}
+
+function candidateOmniPasswords() {
+  const cfg = readConfig();
+  const envFile = readOmniEnvFile();
+  const list = [
+    process.env.INITIAL_PASSWORD,
+    process.env.OMNIROUTE_PASSWORD,
+    cfg.omniPassword,
+    envFile.INITIAL_PASSWORD,
+    envFile.OMNIROUTE_PASSWORD,
+    envFile.DASHBOARD_PASSWORD,
+    envFile.PASSWORD,
+    "CHANGEME",
+    "changeme",
+    "admin",
+    "password",
+    "omniroute",
+  ];
+  const seen = new Set();
+  const out = [];
+  for (const p of list) {
+    if (p == null || p === "") continue;
+    const s = String(p);
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
 function cookieFromSetCookie(setCookie) {
   const list = Array.isArray(setCookie) ? setCookie : setCookie ? [setCookie] : [];
   for (const raw of list) {
@@ -219,8 +281,7 @@ function cookieFromSetCookie(setCookie) {
   return null;
 }
 
-async function loginOmniDashboard() {
-  const password = getOmniPassword();
+async function tryOmniLogin(password) {
   const res = await fetch(`${OMNI}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -229,11 +290,42 @@ async function loginOmniDashboard() {
   });
   const setCookie = typeof res.headers.getSetCookie === "function" ? res.headers.getSetCookie() : [];
   const cookie = cookieFromSetCookie(setCookie) || cookieFromSetCookie(res.headers.get("set-cookie"));
-  if (!res.ok || !cookie) {
-    const text = await res.text().catch(() => "");
-    throw new Error(text || `OmniRoute login failed (${res.status}). Проверь пароль (по умолчанию CHANGEME).`);
+  const text = await res.text().catch(() => "");
+  let json = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    /* ignore */
   }
-  return cookie;
+  return { ok: res.ok && Boolean(cookie), status: res.status, cookie, text, json };
+}
+
+async function loginOmniDashboard() {
+  let lastMsg = "";
+  for (const password of candidateOmniPasswords()) {
+    try {
+      const r = await tryOmniLogin(password);
+      if (r.ok && r.cookie) {
+        try {
+          writeConfig({ omniPassword: password });
+        } catch {
+          /* ignore */
+        }
+        return r.cookie;
+      }
+      lastMsg =
+        (r.json && (r.json.error || r.json.message)) ||
+        r.text ||
+        `login failed (${r.status})`;
+    } catch (err) {
+      lastMsg = String(err.message || err);
+    }
+  }
+  const pretty =
+    /invalid password/i.test(String(lastMsg))
+      ? "Неверный пароль панели OmniRoute. Открой http://127.0.0.1:20128 и проверь пароль (часто CHANGEME), либо задай OMNIROUTE_PASSWORD."
+      : String(lastMsg || "OmniRoute login failed");
+  throw new Error(pretty);
 }
 
 async function startKiroBuilderIdFlow() {
@@ -648,6 +740,7 @@ async function isOmniUp() {
 
 let omniChild = null;
 let omniStopping = false;
+let omniOwned = false; // true if FreeClaude should kill :20128 on exit
 
 function stopOmniRoute() {
   if (omniStopping) return;
@@ -669,22 +762,42 @@ function stopOmniRoute() {
       }
       omniChild = null;
     }
-    // Добиваем сирот: listen :20128 и omniroute serve
+    // Всегда добиваем слушателей :20128 и node/omniroute serve — иначе сироты жрут CPU/лагает мышь
     try {
       const ps = [
         "$ErrorActionPreference='SilentlyContinue'",
-        "Get-NetTCPConnection -LocalPort 20128 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }",
-        "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'omniroute(\\.mjs)?.*serve' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }",
+        "$pids = @()",
+        "Get-NetTCPConnection -LocalPort 20128 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { $pids += $_.OwningProcess }",
+        "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {",
+        "  $_.Name -match '^(node|omniroute)' -and $_.CommandLine -match 'omniroute|20128|serve'",
+        "} | ForEach-Object { $pids += $_.ProcessId }",
+        "$pids = $pids | Where-Object { $_ -and $_ -gt 0 } | Select-Object -Unique",
+        "foreach ($procId in $pids) { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue }",
       ].join("; ");
       spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps], {
         windowsHide: true,
         stdio: "ignore",
-        timeout: 10000,
+        timeout: 15000,
       });
     } catch {
       /* ignore */
     }
+    // fallback without PowerShell NetTCP
+    try {
+      spawnSync(
+        process.env.ComSpec || "cmd.exe",
+        [
+          "/d",
+          "/c",
+          'for /f "tokens=5" %a in (\'netstat -ano ^| findstr :20128 ^| findstr LISTENING\') do taskkill /F /PID %a >nul 2>&1',
+        ],
+        { windowsHide: true, stdio: "ignore", timeout: 8000 }
+      );
+    } catch {
+      /* ignore */
+    }
   } finally {
+    omniOwned = false;
     omniStopping = false;
   }
 }
@@ -694,12 +807,18 @@ function installOmniShutdownHooks() {
   installOmniShutdownHooks.done = true;
   const bye = () => {
     try {
-      stopOmniRoute();
+      if (omniOwned || omniChild) stopOmniRoute();
     } catch {
       /* ignore */
     }
   };
   process.on("exit", bye);
+  // Windows console close / pkg exit
+  try {
+    process.on("beforeExit", bye);
+  } catch {
+    /* ignore */
+  }
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"]) {
     try {
       process.on(sig, () => {
@@ -709,6 +828,14 @@ function installOmniShutdownHooks() {
     } catch {
       /* unsupported on platform */
     }
+  }
+  // Last-chance: poll if parent gone (when launched oddly)
+  try {
+    setInterval(() => {
+      /* keep event loop aware; actual kill is on signals/exit */
+    }, 60_000).unref?.();
+  } catch {
+    /* ignore */
   }
 }
 
@@ -758,6 +885,7 @@ function startOmniRoute() {
       });
     }
     omniChild = child;
+    omniOwned = true;
     child.on("error", (err) => console.error("OmniRoute spawn error:", err.message));
     child.on("exit", (code) => {
       if (omniChild === child) omniChild = null;
@@ -770,7 +898,10 @@ function startOmniRoute() {
 
 async function ensureOmni(timeoutMs = 90000, opts = {}) {
   try {
+    installOmniShutdownHooks();
     if (await isOmniUp()) {
+      // Даже чужой/старый OmniRoute считаем «нашим» для cleanup при выходе
+      omniOwned = true;
       if (opts.liveLog) pushLog("OmniRoute уже online");
       return true;
     }
@@ -779,6 +910,7 @@ async function ensureOmni(timeoutMs = 90000, opts = {}) {
     }
     if (opts.liveLog) pushLog("Поднимаю OmniRoute…");
     startOmniRoute();
+    omniOwned = true;
     const start = Date.now();
     let lastBeat = 0;
     while (Date.now() - start < timeoutMs) {
@@ -1039,7 +1171,10 @@ async function getSetupStatus() {
   const claudeOk = isClaudeCodeReady();
 
   const checks = {
-    node: { ok: Boolean(nodeVersion), detail: nodeVersion || "не найден" },
+    node: {
+      ok: Boolean(nodeVersion),
+      detail: nodeVersion ? `${nodeVersion}${nodeBin ? ` · ${nodeBin}` : ""}` : "не найден",
+    },
     npm: { ok: Boolean(npmBin), detail: npmBin || "не найден" },
     omniroute: { ok: whichExists(omniPath), detail: whichExists(omniPath) ? "установлен" : "не установлен" },
     claude: {
@@ -1681,7 +1816,28 @@ if errorlevel 1 pause
         const cssPath = path.join(root, "styles.css");
         if (fs.existsSync(cssPath)) {
           const css = fs.readFileSync(cssPath, "utf8");
-          html = html.replace(/<link rel="stylesheet" href="\/styles\.css\?v=\d+"\s*\/?>/i, `<style id="fc-css">\n${css}\n</style>`);
+          if (/id=["']fc-css["']/.test(html)) {
+            html = html.replace(
+              /<style id=["']fc-css["']>[\s\S]*?<\/style>/i,
+              `<style id="fc-css">\n${css}\n</style>`
+            );
+          } else {
+            html = html.replace(
+              /<link[^>]*href=["']\/styles\.css[^"']*["'][^>]*>/i,
+              `<style id="fc-css">\n${css}\n</style>`
+            );
+          }
+        }
+        // Bust JS cache every serve (mtime) — avoids stale app.js after updates
+        try {
+          const jsPath = path.join(root, "app.js");
+          const ver = fs.existsSync(jsPath) ? String(fs.statSync(jsPath).mtimeMs | 0) : String(Date.now());
+          html = html.replace(/\/app\.js\?v=[^"']+/i, `/app.js?v=${ver}`);
+          if (!/\/app\.js\?v=/.test(html)) {
+            html = html.replace(/\/app\.js(["'])/i, `/app.js?v=${ver}$1`);
+          }
+        } catch {
+          /* ignore */
         }
         html = html
           .replace(/<link[^>]+fonts\.googleapis\.com[^>]*>\s*/gi, "")
@@ -1725,6 +1881,7 @@ async function main() {
   }
 
   server.listen(PORT, "127.0.0.1", async () => {
+    installOmniShutdownHooks();
     const diskPublicRoot = path.join(EXE_DIR, "public");
     const uiRoot =
       IS_PKG && fs.existsSync(path.join(diskPublicRoot, "index.html")) ? diskPublicRoot : PUBLIC;

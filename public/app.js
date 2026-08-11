@@ -81,11 +81,24 @@ function esc(s) {
 }
 
 function toast(msg, isErr = false) {
-  els.toast.textContent = msg;
-  els.toast.classList.toggle("err", isErr);
+  let text = String(msg == null ? "" : msg);
+  try {
+    if (/^\s*\{/.test(text)) {
+      const j = JSON.parse(text);
+      text = j.error || j.message || j.errorDescription || text;
+    }
+  } catch {
+    /* keep raw */
+  }
+  if (/invalid password/i.test(text)) {
+    text =
+      "Неверный пароль OmniRoute. Открой http://127.0.0.1:20128 — часто пароль CHANGEME.";
+  }
+  els.toast.textContent = text;
+  els.toast.classList.toggle("err", Boolean(isErr));
   els.toast.classList.remove("hidden");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => els.toast.classList.add("hidden"), 3500);
+  toastTimer = setTimeout(() => els.toast.classList.add("hidden"), isErr ? 6500 : 3500);
 }
 
 function setTab(tab) {
