@@ -415,6 +415,67 @@ function getAccountLimitInfo() {
   }
 }
 
+/**
+ * После OAuth OmniRoute иногда пишет токены, но оставляет is_active=0 / disconnected.
+ * Поднимаем такие строки, чтобы UI не думал, что «не авторизован».
+ */
+function healKiroConnections() {
+  const db = getDb(false);
+  try {
+    const now = new Date().toISOString();
+    const result = db
+      .prepare(
+        `UPDATE provider_connections
+         SET is_active = 1,
+             test_status = CASE
+               WHEN test_status IS NULL OR test_status = '' OR lower(test_status) IN ('disconnected','pending','unknown')
+               THEN 'active'
+               ELSE test_status
+             END,
+             last_error = NULL,
+             last_error_at = NULL,
+             updated_at = ?
+         WHERE provider IN ('kiro','kr')
+           AND (
+             (access_token IS NOT NULL AND trim(access_token) != '')
+             OR (refresh_token IS NOT NULL AND trim(refresh_token) != '')
+             OR (api_key IS NOT NULL AND trim(api_key) != '')
+           )
+           AND (
+             is_active = 0
+             OR is_active IS NULL
+             OR lower(COALESCE(test_status, '')) IN ('disconnected', 'pending', 'unknown', '')
+           )
+           AND lower(COALESCE(test_status, '')) NOT IN ('banned', 'expired', 'credits_exhausted')`
+      )
+      .run(now);
+    return { ok: true, healed: Number(result.changes || 0) };
+  } finally {
+    db.close();
+  }
+}
+
+/** Есть ли живое Kiro-соединение с токенами (даже если UI ещё не обновился). */
+function hasKiroCredentials() {
+  const db = getDb(true);
+  try {
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) as c FROM provider_connections
+         WHERE provider IN ('kiro','kr')
+           AND (
+             (access_token IS NOT NULL AND trim(access_token) != '')
+             OR (refresh_token IS NOT NULL AND trim(refresh_token) != '')
+             OR (api_key IS NOT NULL AND trim(api_key) != '')
+           )`
+      )
+      .get();
+    return Number(row?.c || 0) > 0;
+  } finally {
+    db.close();
+  }
+}
+
 module.exports = {
   createApiKey,
   ensureApiKey,
@@ -423,6 +484,8 @@ module.exports = {
   getKeyUsage,
   logoutKiro,
   getAccountLimitInfo,
+  healKiroConnections,
+  hasKiroCredentials,
   formatDuration,
   DB_PATH,
 };

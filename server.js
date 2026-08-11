@@ -187,6 +187,100 @@ async function pollKiroBuilderIdOnce() {
   };
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function countKiroModels() {
+  try {
+    const r = await omniFetch("/v1/models");
+    if (!r.ok) return 0;
+    const all = r.json?.data || [];
+    return all.filter((m) => /^(kiro|kr)\//i.test(m.id || "")).length;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * После AWS «Request approved» OmniRoute ещё секунды пишет токены / каталог моделей.
+ * Ждём готовность, иначе UI показывает «не авторизован» и пустой список.
+ */
+async function finalizeKiroAuth() {
+  const started = Date.now();
+  const timeoutMs = 25000;
+  let keyIssued = null;
+  let healed = 0;
+  let modelsCount = 0;
+  let connected = false;
+
+  // Ключ сразу — /v1/models часто требует Bearer
+  try {
+    let created;
+    if (!readToken()) {
+      created = omniKeys.createApiKey(
+        `freeclaude-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "")}`
+      );
+    } else {
+      created = omniKeys.ensureApiKey(
+        `freeclaude-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "")}`
+      );
+    }
+    const model = readActiveModel() || "kiro/claude-sonnet-4.5";
+    writeSettings(model, created.key);
+    keyIssued = { masked: created.masked, reused: Boolean(created.reused), fresh: !created.reused };
+  } catch (err) {
+    keyIssued = { error: String(err.message || err) };
+  }
+
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const h = omniKeys.healKiroConnections();
+      healed = Math.max(healed, Number(h?.healed || 0));
+    } catch {
+      /* ignore */
+    }
+
+    try {
+      const lim = omniKeys.getAccountLimitInfo();
+      connected = Boolean(lim?.connected) || Boolean(omniKeys.hasKiroCredentials?.());
+    } catch {
+      try {
+        connected = Boolean(omniKeys.hasKiroCredentials());
+      } catch {
+        connected = false;
+      }
+    }
+
+    modelsCount = await countKiroModels();
+    if (connected && modelsCount > 0) break;
+    // Есть креды, но каталог ещё пустой — подождём
+    if (connected && Date.now() - started > 8000 && modelsCount === 0) {
+      // продолжаем до таймаута
+    }
+    await sleep(900);
+  }
+
+  // финальный heal + status
+  try {
+    omniKeys.healKiroConnections();
+    const lim = omniKeys.getAccountLimitInfo();
+    connected = Boolean(lim?.connected) || Boolean(omniKeys.hasKiroCredentials());
+  } catch {
+    /* ignore */
+  }
+  modelsCount = await countKiroModels();
+
+  return {
+    keyIssued,
+    ready: Boolean(connected && modelsCount > 0),
+    kiroConnected: Boolean(connected),
+    modelsCount,
+    healed,
+    waitedMs: Date.now() - started,
+  };
+}
+
 function clearKiroOAuthSession() {
   kiroOAuth.cookie = null;
   kiroOAuth.deviceCode = null;
@@ -1216,30 +1310,20 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && u.pathname === "/api/kiro/poll") {
       try {
         const result = await pollKiroBuilderIdOnce();
-        let keyIssued = null;
+        let extras = {
+          keyIssued: null,
+          ready: false,
+          kiroConnected: false,
+          modelsCount: 0,
+        };
         if (result.success) {
           try {
-            // Авто: если ключа ещё нет — выдать; если есть — оставить (смена Kiro не требует новый sk).
-            // Новый sk только по кнопке «Получить ключ».
-            let created;
-            if (!readToken()) {
-              created = omniKeys.createApiKey(
-                `freeclaude-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "")}`
-              );
-            } else {
-              created = omniKeys.ensureApiKey(
-                `freeclaude-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "")}`
-              );
-              // ensure may reuse; still write so settings stay in sync
-            }
-            const model = readActiveModel() || "kiro/claude-sonnet-4.5";
-            writeSettings(model, created.key);
-            keyIssued = { masked: created.masked, reused: Boolean(created.reused), fresh: !created.reused };
+            extras = await finalizeKiroAuth();
           } catch (err) {
-            keyIssued = { error: String(err.message || err) };
+            extras.keyIssued = { error: String(err.message || err) };
           }
         }
-        return send(res, 200, { ok: true, ...result, keyIssued });
+        return send(res, 200, { ok: true, ...result, ...extras });
       } catch (err) {
         return send(res, 500, { ok: false, success: false, pending: false, error: String(err.message || err) });
       }
@@ -1293,8 +1377,20 @@ const server = http.createServer(async (req, res) => {
       let kiro = false;
       try {
         if (omni) {
+          try {
+            omniKeys.healKiroConnections();
+          } catch {
+            /* ignore */
+          }
           const lim = omniKeys.getAccountLimitInfo();
           kiro = Boolean(lim && lim.connected);
+          if (!kiro) {
+            try {
+              kiro = Boolean(omniKeys.hasKiroCredentials());
+            } catch {
+              /* ignore */
+            }
+          }
         }
       } catch {
         kiro = false;

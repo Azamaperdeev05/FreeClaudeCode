@@ -54,6 +54,8 @@ module.exports = {
   getKeyUsage: (token) => call("getKeyUsage", [token]),
   logoutKiro: (id) => call("logoutKiro", [id || null]),
   getAccountLimitInfo: () => call("getAccountLimitInfo"),
+  healKiroConnections: () => call("healKiroConnections"),
+  hasKiroCredentials: () => call("hasKiroCredentials"),
   formatDuration,
   DB_PATH: path.join(process.env.USERPROFILE || "", ".omniroute", "storage.sqlite"),
 };

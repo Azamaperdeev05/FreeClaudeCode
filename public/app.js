@@ -556,13 +556,7 @@ async function openAwsWindow(url, { fresh = true } = {}) {
   }
 }
 
-function closeKiroModal() {
-  kiroAuth.active = false;
-  if (kiroAuth.timer) {
-    clearTimeout(kiroAuth.timer);
-    kiroAuth.timer = null;
-  }
-  fetch("/api/kiro/cancel", { method: "POST" }).catch(() => {});
+function hideKiroModal() {
   if (els.kiroModal) {
     els.kiroModal.classList.add("hidden");
     els.kiroModal.setAttribute("aria-hidden", "true");
@@ -570,60 +564,107 @@ function closeKiroModal() {
   if (els.btnOpenKiro) els.btnOpenKiro.disabled = false;
 }
 
+function cancelKiroAuth() {
+  kiroAuth.active = false;
+  if (kiroAuth.timer) {
+    clearTimeout(kiroAuth.timer);
+    kiroAuth.timer = null;
+  }
+  fetch("/api/kiro/cancel", { method: "POST" }).catch(() => {});
+  hideKiroModal();
+}
+
+/** Закрытие крестиком — только спрятать UI, poll продолжается в фоне. */
+function closeKiroModal() {
+  if (kiroAuth.active) {
+    toast("Вход продолжается в фоне — после AWS модели появятся сами");
+    hideKiroModal();
+    return;
+  }
+  cancelKiroAuth();
+}
+
+async function finishKiroSuccess(r) {
+  setKiroStatus("Подключено");
+  setKiroWait("done", "Готово", "Kiro подключён. Подтягиваю модели…");
+  toast("Kiro подключён");
+  kiroAuth.active = false;
+  if (els.btnKiroRetry) {
+    els.btnKiroRetry.disabled = false;
+    els.btnKiroRetry.textContent = "Готово";
+  }
+  try {
+    if (kiroAuth.awsWin && !kiroAuth.awsWin.closed) kiroAuth.awsWin.close();
+  } catch {
+    /* ignore */
+  }
+
+  if (r.keyIssued?.masked) {
+    if (els.keyCurrent) els.keyCurrent.textContent = r.keyIssued.masked;
+    if (els.apiKey) els.apiKey.placeholder = r.keyIssued.masked;
+    toast(r.keyIssued.reused ? `Ключ: ${r.keyIssued.masked}` : `Ключ выдан: ${r.keyIssued.masked}`);
+  } else if (r.keyIssued?.error) {
+    toast(`Kiro ок, но ключ: ${r.keyIssued.error}`, true);
+    try {
+      await generateKey();
+    } catch {
+      /* ignore */
+    }
+  } else {
+    try {
+      await generateKey();
+    } catch {
+      /* ignore */
+    }
+  }
+
+  setTab("models");
+  // До 25с: OmniRoute иногда отдаёт модели с задержкой после OAuth
+  let gotModels = Number(r.modelsCount || 0) > 0;
+  for (let i = 0; i < 20; i++) {
+    try {
+      await loadQuota().catch(() => {});
+      await refreshStatus().catch(() => {});
+      await loadModels();
+      if (state.models.length && state.kiroConnected) {
+        gotModels = true;
+        break;
+      }
+      if (state.models.length) {
+        gotModels = true;
+        if (state.kiroConnected) break;
+      }
+    } catch {
+      /* retry */
+    }
+    await new Promise((res) => setTimeout(res, 1200));
+  }
+
+  if (!gotModels) {
+    toast("Kiro вошёл, но модели ещё грузятся — нажми «Обновить»", true);
+  } else if (!state.kiroConnected) {
+    // модели есть, статус догонит
+    updateAuthButtons(true);
+    await refreshStatus().catch(() => {});
+  } else {
+    toast(`Модели: ${state.models.length}`);
+  }
+
+  setTimeout(hideKiroModal, 500);
+}
+
 async function pollKiroLoop() {
   if (!kiroAuth.active) return;
   try {
     const r = await fetch("/api/kiro/poll", { method: "POST" }).then((x) => x.json());
-    if (!kiroAuth.active) return;
+    if (!kiroAuth.active && !r.success) return;
     if (r.success) {
-      setKiroStatus("Подключено");
-      setKiroWait("done", "Готово", "Kiro подключён. Выдаю ключ…");
-      toast("Kiro подключён");
+      // даже если модалку закрыли — доводим успех
       kiroAuth.active = false;
-      if (els.btnKiroRetry) {
-        els.btnKiroRetry.disabled = false;
-        els.btnKiroRetry.textContent = "Готово";
-      }
-      try {
-        if (kiroAuth.awsWin && !kiroAuth.awsWin.closed) kiroAuth.awsWin.close();
-      } catch {
-        /* ignore */
-      }
-      if (r.keyIssued?.masked) {
-        if (els.keyCurrent) els.keyCurrent.textContent = r.keyIssued.masked;
-        if (els.apiKey) els.apiKey.placeholder = r.keyIssued.masked;
-        toast(r.keyIssued.reused ? `Ключ: ${r.keyIssued.masked}` : `Ключ выдан: ${r.keyIssued.masked}`);
-      } else if (r.keyIssued?.error) {
-        toast(`Kiro ок, но ключ: ${r.keyIssued.error}`, true);
-        // запасной путь — кнопка «Получить ключ»
-        try {
-          await generateKey();
-        } catch {
-          /* ignore */
-        }
-      } else {
-        try {
-          await generateKey();
-        } catch {
-          /* ignore */
-        }
-      }
-      await loadQuota().catch(() => {});
-      await refreshStatus().catch(() => {});
-      setTab("models");
-      // OmniRoute иногда отдаёт модели с небольшой задержкой после OAuth
-      for (let i = 0; i < 5; i++) {
-        try {
-          await loadModels();
-          if (state.models.length) break;
-        } catch {
-          /* retry */
-        }
-        await new Promise((r) => setTimeout(r, 1200));
-      }
-      setTimeout(closeKiroModal, 700);
+      await finishKiroSuccess(r);
       return;
     }
+    if (!kiroAuth.active) return;
     if (r.pending || r.error === "authorization_pending" || r.error === "slow_down") {
       setKiroStatus(r.slowDown ? "AWS просит подождать…" : "Ждём подтверждение…");
       setKiroWait(
@@ -631,7 +672,7 @@ async function pollKiroLoop() {
         "Ждём вход в AWS…",
         r.slowDown
           ? "AWS просит чуть подождать — продолжаем проверку."
-          : "Подтверди код в окне AWS Access Portal. Статус здесь обновится сам."
+          : "После «Request approved» не закрывай FreeClaude сразу — дождёмся моделей сами."
       );
       const wait = r.slowDown ? Math.max(kiroAuth.intervalMs + 5000, 10000) : kiroAuth.intervalMs;
       kiroAuth.timer = setTimeout(pollKiroLoop, wait);
@@ -645,6 +686,7 @@ async function pollKiroLoop() {
       els.btnKiroRetry.textContent = "Повторить";
     }
   } catch (e) {
+    if (!kiroAuth.active) return;
     const msg = String(e.message || e);
     setKiroStatus(msg, true);
     setKiroWait("error", "Ошибка связи", msg);
@@ -978,7 +1020,12 @@ document.getElementById("btnOpenKiro").addEventListener("click", openKiroAuth);
 if (els.btnAwsSignOut) els.btnAwsSignOut.addEventListener("click", awsSignOut);
 if (els.kiroModal) {
   els.kiroModal.addEventListener("click", (e) => {
-    if (e.target && e.target.matches("[data-kiro-close]")) closeKiroModal();
+    if (!e.target) return;
+    if (e.target.matches("[data-kiro-cancel]")) {
+      cancelKiroAuth();
+      return;
+    }
+    if (e.target.matches("[data-kiro-close]")) closeKiroModal();
   });
 }
 if (els.btnKiroOpenAws) {
