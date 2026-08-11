@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.2 — 2026-08-11
+
+- Fix: detect Node.js / npm from full user PATH (nvm, scoop, custom installs) — not only `C:\Program Files\nodejs`
+
 ## 1.0.1 — 2026-08-11
 
 - Fix: after AWS “Request approved”, auth no longer drops if the modal is closed

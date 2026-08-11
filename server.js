@@ -27,15 +27,144 @@ const DATA_DIR = (() => {
 const CONFIG = path.join(DATA_DIR, "config.json");
 const FREECLAUDE = path.join(DATA_DIR, "freeclaude.bat");
 const PUBLIC = path.join(__dirname, "public");
-const NODE_DIR = "C:\\Program Files\\nodejs";
-const NODE = path.join(NODE_DIR, "node.exe");
-const NPM_CMD = path.join(NODE_DIR, "npm.cmd");
+const NODE_DIR_DEFAULT = "C:\\Program Files\\nodejs";
 const NPM_BIN = path.join(process.env.APPDATA || "", "npm");
 const WINGET = path.join(process.env.LOCALAPPDATA || "", "Microsoft\\WindowsApps\\winget.exe");
 const ACCESS_URL = "https://pastebin.com/raw/rJp7g0eB";
 const TELEGRAM_URL = "https://t.me/loveaideep";
 const AWS_SIGNOUT_URL = "https://view.awsapps.com/start/#/signout";
 const AWS_PORTAL_URL = "https://view.awsapps.com/start";
+
+/** Cached resolved paths — GUI apps often miss user PATH that cmd.exe has. */
+let _nodePathCache = undefined;
+let _npmPathCache = undefined;
+let _winPathCache = null;
+let _winPathCachedAt = 0;
+
+function readWindowsUserMachinePath() {
+  if (_winPathCache && Date.now() - _winPathCachedAt < 60_000) return _winPathCache;
+  try {
+    const r = spawnSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "[Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')",
+      ],
+      { encoding: "utf8", windowsHide: true, timeout: 10000 }
+    );
+    _winPathCache = String(r.stdout || "").trim();
+  } catch {
+    _winPathCache = "";
+  }
+  _winPathCachedAt = Date.now();
+  return _winPathCache;
+}
+
+function enrichedPath() {
+  const parts = [
+    NODE_DIR_DEFAULT,
+    process.env.NVM_SYMLINK || "",
+    process.env.NVM_HOME || "",
+    NPM_BIN,
+    process.env.PATH || "",
+    readWindowsUserMachinePath(),
+  ].filter(Boolean);
+  return parts.join(";");
+}
+
+function whereOnPath(name) {
+  try {
+    const r = spawnSync("where.exe", [name], {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 8000,
+      env: { ...process.env, PATH: enrichedPath() },
+    });
+    const lines = String(r.stdout || "")
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const line of lines) {
+      if (fs.existsSync(line)) return line;
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function invalidateToolCache() {
+  _nodePathCache = undefined;
+  _npmPathCache = undefined;
+}
+
+function resolveNode() {
+  if (_nodePathCache !== undefined) {
+    if (_nodePathCache && fs.existsSync(_nodePathCache)) return _nodePathCache;
+    _nodePathCache = undefined;
+  }
+  const candidates = [
+    path.join(NODE_DIR_DEFAULT, "node.exe"),
+    process.env.NVM_SYMLINK ? path.join(process.env.NVM_SYMLINK, "node.exe") : null,
+    path.join(process.env.LOCALAPPDATA || "", "Programs", "node", "node.exe"),
+    path.join(os.homedir(), "scoop", "apps", "nodejs", "current", "node.exe"),
+    path.join(os.homedir(), "scoop", "apps", "nodejs-lts", "current", "node.exe"),
+    whereOnPath("node.exe"),
+    whereOnPath("node"),
+  ].filter(Boolean);
+
+  for (const c of candidates) {
+    try {
+      if (c && fs.existsSync(c)) {
+        _nodePathCache = c;
+        return c;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  _nodePathCache = null;
+  return null;
+}
+
+function resolveNpm() {
+  if (_npmPathCache !== undefined) {
+    if (_npmPathCache && fs.existsSync(_npmPathCache)) return _npmPathCache;
+    _npmPathCache = undefined;
+  }
+  const node = resolveNode();
+  const besideNode = node ? path.join(path.dirname(node), "npm.cmd") : null;
+  const candidates = [
+    besideNode,
+    path.join(NODE_DIR_DEFAULT, "npm.cmd"),
+    process.env.NVM_SYMLINK ? path.join(process.env.NVM_SYMLINK, "npm.cmd") : null,
+    path.join(os.homedir(), "scoop", "apps", "nodejs", "current", "npm.cmd"),
+    path.join(os.homedir(), "scoop", "apps", "nodejs-lts", "current", "npm.cmd"),
+    whereOnPath("npm.cmd"),
+    whereOnPath("npm"),
+  ].filter(Boolean);
+
+  for (const c of candidates) {
+    try {
+      if (c && fs.existsSync(c)) {
+        _npmPathCache = c;
+        return c;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  _npmPathCache = null;
+  return null;
+}
+
+function nodeDir() {
+  const n = resolveNode();
+  return n ? path.dirname(n) : NODE_DIR_DEFAULT;
+}
 
 // Packaged EXE: do not auto-spawn a browser from inside pkg (causes 0xC0000005).
 // Use FreeClaude.cmd launcher, or open http://127.0.0.1:3847 manually.
@@ -590,7 +719,7 @@ function startOmniRoute() {
 
   const env = {
     ...process.env,
-    PATH: `${NODE_DIR};${NPM_BIN};${process.env.PATH || ""}`,
+    PATH: `${nodeDir()};${NPM_BIN};${enrichedPath()}`,
   };
 
   // OmniRoute — дочерний процесс FreeClaude (не detached-сирота).
@@ -611,8 +740,9 @@ function startOmniRoute() {
     console.log("");
 
     let child;
-    if (whichExists(NODE) && whichExists(mjs)) {
-      child = spawn(NODE, [mjs, "serve", "--no-open"], {
+    const nodeBin = resolveNode();
+    if (nodeBin && whichExists(mjs)) {
+      child = spawn(nodeBin, [mjs, "serve", "--no-open"], {
         detached: false,
         stdio: "ignore",
         windowsHide: true,
@@ -681,7 +811,7 @@ async function ensureOmni(timeoutMs = 90000, opts = {}) {
 function writeBat(model, token) {
   const bat = `@echo off
 setlocal EnableExtensions
-set "PATH=C:\\Program Files\\nodejs;%APPDATA%\\npm;%PATH%"
+set "PATH=${nodeDir()};%APPDATA%\\npm;%PATH%"
 set "ANTHROPIC_AUTH_TOKEN=${token}"
 set "OMNIROUTE_API_KEY=${token}"
 set "OMNIROUTE=%APPDATA%\\npm\\omniroute.cmd"
@@ -746,21 +876,24 @@ function writeSettings(model, token) {
 async function runCmd(command, args, opts = {}) {
   if (opts.track && installState.cancelRequested) throw new Error("Установка остановлена");
 
+  const nodeBin = resolveNode();
+  const npmBin = resolveNpm();
   const env = {
     ...process.env,
-    PATH: `${NODE_DIR};${NPM_BIN};${process.env.PATH || ""}`,
+    PATH: `${nodeDir()};${NPM_BIN};${enrichedPath()}`,
     ...(opts.env || {}),
   };
 
   let file = command;
   let finalArgs = args;
-  const npmCli = path.join(NODE_DIR, "node_modules", "npm", "bin", "npm-cli.js");
+  const npmCli = path.join(nodeDir(), "node_modules", "npm", "bin", "npm-cli.js");
   if (
     process.platform === "win32" &&
-    (command === NPM_CMD || /[\\/]npm\.cmd$/i.test(String(command))) &&
+    nodeBin &&
+    ((npmBin && command === npmBin) || /[\\/]npm\.cmd$/i.test(String(command))) &&
     whichExists(npmCli)
   ) {
-    file = NODE;
+    file = nodeBin;
     finalArgs = [npmCli, ...args];
   } else if (process.platform === "win32" && /\.(cmd|bat)$/i.test(String(command))) {
     file = process.env.ComSpec || "cmd.exe";
@@ -887,10 +1020,13 @@ function assertNotCancelled() {
 }
 
 async function getSetupStatus() {
+  invalidateToolCache();
+  const nodeBin = resolveNode();
+  const npmBin = resolveNpm();
   let nodeVersion = null;
-  if (whichExists(NODE)) {
+  if (nodeBin) {
     try {
-      nodeVersion = (await runCmd(NODE, ["-v"])).trim();
+      nodeVersion = (await runCmd(nodeBin, ["-v"])).trim();
     } catch {
       nodeVersion = null;
     }
@@ -904,7 +1040,7 @@ async function getSetupStatus() {
 
   const checks = {
     node: { ok: Boolean(nodeVersion), detail: nodeVersion || "не найден" },
-    npm: { ok: whichExists(NPM_CMD), detail: whichExists(NPM_CMD) ? NPM_CMD : "не найден" },
+    npm: { ok: Boolean(npmBin), detail: npmBin || "не найден" },
     omniroute: { ok: whichExists(omniPath), detail: whichExists(omniPath) ? "установлен" : "не установлен" },
     claude: {
       ok: claudeOk,
@@ -932,9 +1068,12 @@ async function installAll() {
   installState.child = null;
 
   try {
+    invalidateToolCache();
     installState.step = "node";
     assertNotCancelled();
-    if (!whichExists(NODE)) {
+    let nodeBin = resolveNode();
+    let npmBin = resolveNpm();
+    if (!nodeBin) {
       pushLog("Устанавливаю Node.js через winget…");
       if (!whichExists(WINGET)) throw new Error("winget не найден. Установи Node.js вручную с nodejs.org");
       await runCmd(WINGET, ["install", "-e", "--id", "OpenJS.NodeJS.LTS", "--accept-package-agreements", "--accept-source-agreements"], {
@@ -942,13 +1081,21 @@ async function installAll() {
         liveLog: true,
         track: true,
       });
+      invalidateToolCache();
+      _winPathCache = null;
+      nodeBin = resolveNode();
+      npmBin = resolveNpm();
       pushLog("Node.js установлен");
     } else {
-      pushLog(`Node.js уже есть: ${(await runCmd(NODE, ["-v"])).trim()}`);
+      pushLog(`Node.js уже есть: ${(await runCmd(nodeBin, ["-v"])).trim()} (${nodeBin})`);
     }
 
     assertNotCancelled();
-    if (!whichExists(NPM_CMD)) throw new Error("npm.cmd не найден после установки Node.js. Перезапусти FreeClaude.");
+    if (!npmBin) {
+      invalidateToolCache();
+      npmBin = resolveNpm();
+    }
+    if (!npmBin) throw new Error("npm.cmd не найден. Перезапусти FreeClaude или добавь Node в PATH.");
 
     const omniPath = path.join(NPM_BIN, "omniroute.cmd");
     const claudePath = path.join(NPM_BIN, "claude.cmd");
@@ -957,7 +1104,7 @@ async function installAll() {
     if (!whichExists(omniPath)) {
       pushLog("Устанавливаю OmniRoute (npm i -g omniroute)…");
       await runCmd(
-        NPM_CMD,
+        npmBin,
         ["install", "-g", "omniroute", "--no-fund", "--no-audit", "--loglevel", "verbose"],
         {
           timeout: 1000 * 60 * 12,
@@ -984,7 +1131,7 @@ async function installAll() {
         pushLog("Устанавливаю Claude Code (npm i -g @anthropic-ai/claude-code)…");
       }
       await runCmd(
-        NPM_CMD,
+        npmBin,
         [
           "install",
           "-g",
@@ -1012,7 +1159,7 @@ async function installAll() {
         const installJs = path.join(NPM_BIN, "node_modules", "@anthropic-ai", "claude-code", "install.cjs");
         if (whichExists(installJs)) {
           pushLog("Запускаю postinstall Claude Code вручную…");
-          await runCmd(NODE, [installJs], {
+          await runCmd(nodeBin || resolveNode(), [installJs], {
             timeout: 1000 * 60 * 5,
             liveLog: true,
             track: true,
@@ -1490,7 +1637,7 @@ const server = http.createServer(async (req, res) => {
         launcher,
         `@echo off
 setlocal EnableExtensions
-set "PATH=C:\\Program Files\\nodejs;%APPDATA%\\npm;%PATH%"
+set "PATH=${nodeDir().replace(/\\/g, "\\\\")};%APPDATA%\\npm;%PATH%"
 title Claude Code - ${model}
 echo.
 echo  Model: ${model}
@@ -1506,7 +1653,7 @@ if errorlevel 1 pause
         stdio: "ignore",
         windowsHide: false,
         cwd: DATA_DIR,
-        env: { ...process.env, PATH: `${NODE_DIR};${NPM_BIN};${process.env.PATH || ""}` },
+        env: { ...process.env, PATH: `${nodeDir()};${NPM_BIN};${enrichedPath()}` },
       }).unref();
 
       return send(res, 200, { ok: true, model });

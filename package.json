@@ -1,6 +1,6 @@
 {
   "name": "freeclaude-code",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Local Windows companion UI for Claude Code + OmniRoute + Kiro",
   "private": true,
   "bin": "server.js",

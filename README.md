@@ -12,7 +12,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white" alt="Windows" />
   <img src="https://img.shields.io/badge/Node.js-22%2B-339933?logo=nodedotjs&logoColor=white" alt="Node" />
-  <img src="https://img.shields.io/badge/Release-v1.0.1-7c6cff" alt="Release" />
+  <img src="https://img.shields.io/badge/Release-v1.0.2-7c6cff" alt="Release" />
   <img src="https://img.shields.io/badge/License-MIT-green" alt="MIT" />
 </p>
 
@@ -48,7 +48,7 @@
 3. Open `http://127.0.0.1:3847`
 4. Settings → Kiro → Models → Launch
 
-> Latest: **v1.0.1** — more reliable Kiro/AWS login and model loading.
+> Latest: **v1.0.2** — finds Node/npm even when installed outside Program Files.
 
 > Copy the **whole folder** to another PC.
 
