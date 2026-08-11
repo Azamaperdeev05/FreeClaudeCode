@@ -1,48 +1,58 @@
-# FreeClaudeCode
+<p align="center">
+  <img src="assets/banner.svg" alt="FreeClaudeCode" width="100%" />
+</p>
 
-Local Windows helper for **Claude Code** — install stack, sign in, pick a model, launch.
+<h1 align="center">FreeClaudeCode</h1>
 
-![Dashboard](assets/screenshot.png)
+<p align="center">
+  <b>Free Claude Code stack — in one clean UI</b><br/>
+  OmniRoute + Kiro + models + launch. No setup hell.
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white" alt="Windows" />
+  <img src="https://img.shields.io/badge/Node.js-22%2B-339933?logo=nodedotjs&logoColor=white" alt="Node" />
+  <img src="https://img.shields.io/badge/Release-v1.0.0-7c6cff" alt="Release" />
+  <img src="https://img.shields.io/badge/License-MIT-green" alt="MIT" />
+</p>
+
+<p align="center">
+  <a href="https://github.com/kolevans/FreeClaudeCode/releases/latest">⬇️ Download</a> ·
+  <a href="#-features">✨ Features</a> ·
+  <a href="#-quick-start">🚀 Quick start</a> ·
+  <a href="https://t.me/loveaideep">💬 Telegram</a>
+</p>
+
+<p align="center">
+  <img src="assets/screenshot.png" alt="FreeClaudeCode dashboard" width="900" />
+</p>
+
+---
+
+## ✨ Features
 
 | | |
-|:--|:--|
-| **UI** | `http://127.0.0.1:3847` |
-| **Router** | OmniRoute `http://127.0.0.1:20128` |
-| **OS** | Windows 10 / 11 |
-| **Runtime** | Node.js 22+ |
-
-[Download ZIP](https://github.com/kolevans/FreeClaudeCode/releases/latest) · [Telegram](https://t.me/loveaideep) · [License](LICENSE)
-
----
-
-## Why this exists
-
-Claude Code is powerful, but setup is noisy: Node, OmniRoute, Kiro login, API keys, model switching. FreeClaudeCode wraps that into one local panel so you spend time coding, not configuring.
+|---|---|
+| 🧰 **All-in-one stack** | Node · OmniRoute · Claude Code — from one panel |
+| 🔑 **Kiro login** | Device code + auto API key |
+| 🧠 **Model switcher** | Pick a model, check status, go |
+| ▶️ **One-click launch** | Open Claude Code on the active model |
+| 📦 **Portable build** | Zip → extract → run |
 
 ---
 
-## What you get
+## ⬇️ Download
 
-- One-click install checks for Node / OmniRoute / Claude Code  
-- Kiro (AWS Builder ID) device login + automatic key creation  
-- Model grid with live status checks  
-- Launch Claude Code against the active model  
-- Portable Windows build for sharing the folder as-is  
+1. Get the ZIP from **[Releases](https://github.com/kolevans/FreeClaudeCode/releases/latest)**
+2. Extract → run `FreeClaude.exe`
+3. Open `http://127.0.0.1:3847`
+4. Settings → Kiro → Models → Launch
 
----
-
-## Install from release
-
-1. Grab the latest asset from [Releases](https://github.com/kolevans/FreeClaudeCode/releases/latest)  
-2. Unzip anywhere  
-3. Start `FreeClaude.exe`  
-4. Open the local UI and finish Settings → Kiro → Models  
-
-> Tip: move the **whole** folder when copying to another PC.
+> Copy the **whole folder** to another PC.
 
 ---
 
-## Run from source
+## 🚀 Quick start
 
 ```powershell
 git clone https://github.com/kolevans/FreeClaudeCode.git
@@ -51,10 +61,10 @@ npm install
 node server.js
 ```
 
-Then open `http://127.0.0.1:3847`.
+UI → `http://127.0.0.1:3847` · OmniRoute → `http://127.0.0.1:20128`
 
 <details>
-<summary>Optional manual stack</summary>
+<summary>📦 Manual install (optional)</summary>
 
 ```powershell
 winget install OpenJS.NodeJS.LTS
@@ -66,61 +76,36 @@ omniroute
 
 ---
 
-## Build portable EXE
+## 🏗️ Build EXE
 
 ```powershell
 .\build-release.ps1
 ```
 
-Artifacts land in `..\dist\FreeClaude\`.
+Output: `..\dist\FreeClaude\`
 
 ---
 
-## Repo map
-
-| Path | Role |
-|------|------|
-| `server.js` | Local HTTP app, installer, Kiro flows |
-| `omni-keys.js` | OmniRoute SQLite helpers |
-| `public/` | Front-end |
-| `build-release.ps1` | Packaging script |
-| `assets/` | README media |
-
----
-
-## Where data lives
-
-- `%APPDATA%\FreeClaude\` — app config  
-- `%USERPROFILE%\.omniroute\` — router DB / keys  
-- `%USERPROFILE%\.claude\` — Claude Code profile  
-
-Password override: `OMNIROUTE_PASSWORD` or `INITIAL_PASSWORD` (default `CHANGEME`).
-
----
-
-## Flow
+## 📁 Structure
 
 ```text
-Browser UI ──► FreeClaudeCode ──► OmniRoute
-                     │
-                     ├── Kiro / Builder ID
-                     └── Claude Code CLI
+server.js          # app + setup + Kiro
+omni-keys.js       # OmniRoute keys
+public/            # UI
+build-release.ps1  # portable pack
+assets/            # media
 ```
 
-Everything stays on your machine.
+---
+
+## 🔐 Notes
+
+- Data: `%APPDATA%\FreeClaude`, `~\.omniroute`, `~\.claude`
+- Password env: `OMNIROUTE_PASSWORD` / `INITIAL_PASSWORD` (default `CHANGEME`)
+- Don’t commit personal keys
 
 ---
 
-## Safety
-
-Ship source only. Keep personal keys and `config.json` out of git.
-
----
-
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md).
-
----
-
-MIT © 2026 · contact [@loveaideep](https://t.me/loveaideep)
+<p align="center">
+  MIT · <a href="https://t.me/loveaideep">@loveaideep</a>
+</p>
