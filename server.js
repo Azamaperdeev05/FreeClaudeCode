@@ -16,7 +16,10 @@ const PROFILE_DIR = path.join(process.env.USERPROFILE || os.homedir(), ".claude"
 const IS_PKG = Boolean(process.pkg);
 const EXE_DIR = IS_PKG ? path.dirname(process.execPath) : __dirname;
 const DATA_DIR = (() => {
-  const dir = path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "FreeClaude");
+  const isWin = process.platform === "win32";
+  const dir = isWin
+    ? path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "FreeClaude")
+    : path.join(os.homedir(), ".config", "FreeClaude");
   try {
     fs.mkdirSync(dir, { recursive: true });
   } catch {
@@ -25,10 +28,12 @@ const DATA_DIR = (() => {
   return dir;
 })();
 const CONFIG = path.join(DATA_DIR, "config.json");
-const FREECLAUDE = path.join(DATA_DIR, "freeclaude.bat");
+const FREECLAUDE = path.join(DATA_DIR, process.platform === "win32" ? "freeclaude.bat" : "freeclaude.sh");
 const PUBLIC = path.join(__dirname, "public");
 const NODE_DIR_DEFAULT = "C:\\Program Files\\nodejs";
-const NPM_BIN = path.join(process.env.APPDATA || "", "npm");
+const NPM_BIN = process.platform === "win32"
+  ? path.join(process.env.APPDATA || "", "npm")
+  : path.join(os.homedir(), ".npm-global", "bin");
 const WINGET = path.join(process.env.LOCALAPPDATA || "", "Microsoft\\WindowsApps\\winget.exe");
 const ACCESS_URL = "https://pastebin.com/raw/rJp7g0eB";
 const TELEGRAM_URL = "https://t.me/loveaideep";
@@ -64,20 +69,27 @@ function readWindowsUserMachinePath() {
 }
 
 function enrichedPath() {
-  const parts = [
-    NODE_DIR_DEFAULT,
-    process.env.NVM_SYMLINK || "",
-    process.env.NVM_HOME || "",
-    NPM_BIN,
-    process.env.PATH || "",
-    readWindowsUserMachinePath(),
-  ].filter(Boolean);
-  return parts.join(";");
+  const isWin = process.platform === "win32";
+  const pathSep = isWin ? ";" : ":";
+  const extraPaths = isWin
+    ? [NODE_DIR_DEFAULT, process.env.NVM_SYMLINK || "", process.env.NVM_HOME || "", NPM_BIN, readWindowsUserMachinePath()]
+    : [
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+        "/opt/homebrew/opt/node@22/bin",
+        path.join(os.homedir(), ".nvm/versions/node", process.version, "bin"),
+        path.join(os.homedir(), ".npm-global/bin"),
+        path.dirname(process.execPath),
+      ];
+  const parts = [...extraPaths, process.env.PATH || ""].filter(Boolean);
+  return parts.join(pathSep);
 }
 
 function whereOnPath(name) {
   try {
-    const r = spawnSync("where.exe", [name], {
+    const isWin = process.platform === "win32";
+    const cmd = isWin ? "where.exe" : "which";
+    const r = spawnSync(cmd, [name], {
       encoding: "utf8",
       windowsHide: true,
       timeout: 8000,
@@ -107,24 +119,30 @@ function resolveNode() {
     _nodePathCache = undefined;
   }
 
+  const isWin = process.platform === "win32";
   const driveCandidates = [];
-  for (const letter of "CDEFGHIJKLMNOPQRSTUVWXYZ") {
-    for (const base of [`${letter}:\\Program Files`, `${letter}:\\Program Files (x86)`]) {
-      for (const name of ["nodejs", "Nodejs", "Node.js", "node"]) {
-        driveCandidates.push(path.join(base, name, "node.exe"));
+  if (isWin) {
+    for (const letter of "CDEFGHIJKLMNOPQRSTUVWXYZ") {
+      for (const base of [`${letter}:\\Program Files`, `${letter}:\\Program Files (x86)`]) {
+        for (const name of ["nodejs", "Nodejs", "Node.js", "node"]) {
+          driveCandidates.push(path.join(base, name, "node.exe"));
+        }
       }
     }
   }
 
   const candidates = [
-    path.join(NODE_DIR_DEFAULT, "node.exe"),
+    isWin ? path.join(NODE_DIR_DEFAULT, "node.exe") : "/opt/homebrew/bin/node",
+    isWin ? null : "/opt/homebrew/opt/node@22/bin/node",
+    isWin ? null : "/usr/local/bin/node",
     process.env.NVM_SYMLINK ? path.join(process.env.NVM_SYMLINK, "node.exe") : null,
     path.join(process.env.LOCALAPPDATA || "", "Programs", "node", "node.exe"),
     path.join(os.homedir(), "scoop", "apps", "nodejs", "current", "node.exe"),
     path.join(os.homedir(), "scoop", "apps", "nodejs-lts", "current", "node.exe"),
     ...driveCandidates,
-    whereOnPath("node.exe"),
+    whereOnPath(isWin ? "node.exe" : "node"),
     whereOnPath("node"),
+    process.execPath && process.execPath.includes("node") ? process.execPath : null,
   ].filter(Boolean);
 
   for (const c of candidates) {
@@ -147,15 +165,19 @@ function resolveNpm() {
     _npmPathCache = undefined;
   }
   const node = resolveNode();
-  const besideNode = node ? path.join(path.dirname(node), "npm.cmd") : null;
+  const isWin = process.platform === "win32";
+  const npmName = isWin ? "npm.cmd" : "npm";
+  const besideNode = node ? path.join(path.dirname(node), npmName) : null;
   // Prefer npm next to node.exe (E:\Program Files\Nodejs) over %APPDATA%\npm shims
   const candidates = [
     besideNode,
-    path.join(NODE_DIR_DEFAULT, "npm.cmd"),
+    isWin ? path.join(NODE_DIR_DEFAULT, "npm.cmd") : "/opt/homebrew/bin/npm",
+    isWin ? null : "/opt/homebrew/opt/node@22/bin/npm",
+    isWin ? null : "/usr/local/bin/npm",
     process.env.NVM_SYMLINK ? path.join(process.env.NVM_SYMLINK, "npm.cmd") : null,
     path.join(os.homedir(), "scoop", "apps", "nodejs", "current", "npm.cmd"),
     path.join(os.homedir(), "scoop", "apps", "nodejs-lts", "current", "npm.cmd"),
-    whereOnPath("npm.cmd"),
+    whereOnPath(npmName),
     whereOnPath("npm"),
   ].filter(Boolean);
 
@@ -528,6 +550,17 @@ function openUrlApp(url) {
       /* fall through */
     }
   }
+  if (process.platform === "darwin") {
+    try {
+      spawn("open", [url], { detached: true, stdio: "ignore" }).unref();
+      return true;
+    } catch {}
+  } else if (process.platform === "linux") {
+    try {
+      spawn("xdg-open", [url], { detached: true, stdio: "ignore" }).unref();
+      return true;
+    } catch {}
+  }
   try {
     const child = spawn(
       process.env.ComSpec || "cmd.exe",
@@ -667,11 +700,22 @@ function whichExists(file) {
 }
 
 function claudeNativeBin() {
-  return path.join(NPM_BIN, "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe");
+  const isWin = process.platform === "win32";
+  if (isWin) {
+    return path.join(NPM_BIN, "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe");
+  }
+  const found = whereOnPath("claude");
+  if (found) return found;
+  return path.join(NPM_BIN, "node_modules", "@anthropic-ai", "claude-code", "cli.mjs");
 }
 
 /** Real Claude Code binary — not the 500-byte postinstall stub. */
 function isClaudeCodeReady() {
+  const isWin = process.platform === "win32";
+  if (!isWin) {
+    const claudeBin = whereOnPath("claude") || (resolveNpm() ? path.join(path.dirname(resolveNpm()), "claude") : null);
+    return Boolean(claudeBin && fs.existsSync(claudeBin));
+  }
   const cmd = path.join(NPM_BIN, "claude.cmd");
   const bin = claudeNativeBin();
   if (!whichExists(cmd) || !whichExists(bin)) return false;
@@ -839,23 +883,48 @@ function installOmniShutdownHooks() {
   }
 }
 
+function seedOmniPasswordIfNeeded() {
+  try {
+    const dbPath = path.join(os.homedir(), ".omniroute", "storage.sqlite");
+    if (!fs.existsSync(dbPath)) return;
+    const Database = require("better-sqlite3");
+    const db = new Database(dbPath);
+    const row = db.prepare("SELECT value FROM key_value WHERE namespace='settings' AND key='password'").get();
+    if (!row || !row.value) {
+      const bcrypt = require("bcryptjs");
+      const pass = getOmniPassword();
+      const hash = bcrypt.hashSync(pass, 12);
+      db.prepare("INSERT OR REPLACE INTO key_value (namespace, key, value) VALUES ('settings', 'password', ?)").run(JSON.stringify(hash));
+      db.prepare("INSERT OR REPLACE INTO key_value (namespace, key, value) VALUES ('settings', 'setupComplete', 'true')").run();
+    }
+    db.close();
+  } catch (err) {
+    /* ignore seeding errors */
+  }
+}
+
 function startOmniRoute() {
-  const mjs = path.join(NPM_BIN, "node_modules", "omniroute", "bin", "omniroute.mjs");
-  const omniCmd = path.join(NPM_BIN, "omniroute.cmd");
-  if (!whichExists(mjs) && !whichExists(omniCmd)) return;
+  seedOmniPasswordIfNeeded();
+  const isWin = process.platform === "win32";
+  const omniBin = whereOnPath(isWin ? "omniroute.cmd" : "omniroute");
+  const mjsCandidates = [
+    path.join(NPM_BIN, "node_modules", "omniroute", "bin", "omniroute.mjs"),
+    "/opt/homebrew/lib/node_modules/omniroute/bin/omniroute.mjs",
+    "/usr/local/lib/node_modules/omniroute/bin/omniroute.mjs",
+  ];
+  const mjs = mjsCandidates.find((f) => fs.existsSync(f));
+
+  if (!mjs && !omniBin) return;
 
   const env = {
     ...process.env,
-    PATH: `${nodeDir()};${NPM_BIN};${enrichedPath()}`,
+    INITIAL_PASSWORD: getOmniPassword(),
+    OMNIROUTE_PASSWORD: getOmniPassword(),
+    PATH: enrichedPath(),
   };
 
-  // OmniRoute — дочерний процесс FreeClaude (не detached-сирота).
-  // При закрытии FreeClaude убиваем OmniRoute.
   try {
-    if (omniChild && omniChild.exitCode == null) {
-      return;
-    }
-
+    if (omniChild && omniChild.exitCode == null) return;
     installOmniShutdownHooks();
 
     console.log("");
@@ -868,16 +937,23 @@ function startOmniRoute() {
 
     let child;
     const nodeBin = resolveNode();
-    if (nodeBin && whichExists(mjs)) {
+    if (nodeBin && mjs) {
       child = spawn(nodeBin, [mjs, "serve", "--no-open"], {
         detached: false,
         stdio: "ignore",
         windowsHide: true,
         env,
-        cwd: path.join(NPM_BIN, "node_modules", "omniroute"),
+        cwd: path.dirname(path.dirname(mjs)),
       });
-    } else {
-      child = spawn(process.env.ComSpec || "cmd.exe", ["/d", "/c", omniCmd, "serve", "--no-open"], {
+    } else if (omniBin) {
+      child = spawn(omniBin, ["serve", "--no-open"], {
+        detached: false,
+        stdio: "ignore",
+        windowsHide: true,
+        env,
+      });
+    } else if (isWin && whichExists(path.join(NPM_BIN, "omniroute.cmd"))) {
+      child = spawn(process.env.ComSpec || "cmd.exe", ["/d", "/c", path.join(NPM_BIN, "omniroute.cmd"), "serve", "--no-open"], {
         detached: false,
         stdio: "ignore",
         windowsHide: true,
@@ -886,11 +962,13 @@ function startOmniRoute() {
     }
     omniChild = child;
     omniOwned = true;
-    child.on("error", (err) => console.error("OmniRoute spawn error:", err.message));
-    child.on("exit", (code) => {
-      if (omniChild === child) omniChild = null;
-      console.log(`OmniRoute stopped (code ${code})`);
-    });
+    if (child) {
+      child.on("error", (err) => console.error("OmniRoute spawn error:", err.message));
+      child.on("exit", (code) => {
+        if (omniChild === child) omniChild = null;
+        console.log(`OmniRoute stopped (code ${code})`);
+      });
+    }
   } catch (err) {
     console.error("OmniRoute start failed:", err && err.message ? err.message : err);
   }
@@ -905,7 +983,15 @@ async function ensureOmni(timeoutMs = 90000, opts = {}) {
       if (opts.liveLog) pushLog("OmniRoute уже online");
       return true;
     }
-    if (!whichExists(path.join(NPM_BIN, "omniroute.cmd")) && !whichExists(path.join(NPM_BIN, "node_modules", "omniroute", "bin", "omniroute.mjs"))) {
+    const isWin = process.platform === "win32";
+    const omniBin = whereOnPath(isWin ? "omniroute.cmd" : "omniroute");
+    const mjsCandidates = [
+      path.join(NPM_BIN, "node_modules", "omniroute", "bin", "omniroute.mjs"),
+      "/opt/homebrew/lib/node_modules/omniroute/bin/omniroute.mjs",
+      "/usr/local/lib/node_modules/omniroute/bin/omniroute.mjs",
+    ];
+    const hasOmni = Boolean(omniBin || mjsCandidates.some((f) => fs.existsSync(f)));
+    if (!hasOmni) {
       return false;
     }
     if (opts.liveLog) pushLog("Поднимаю OmniRoute…");
@@ -941,7 +1027,11 @@ async function ensureOmni(timeoutMs = 90000, opts = {}) {
 }
 
 function writeBat(model, token) {
-  const bat = `@echo off
+  const isWin = process.platform === "win32";
+
+  let script;
+  if (isWin) {
+    script = `@echo off
 setlocal EnableExtensions
 set "PATH=${nodeDir()};%APPDATA%\\npm;%PATH%"
 set "ANTHROPIC_AUTH_TOKEN=${token}"
@@ -952,16 +1042,7 @@ echo Checking OmniRoute...
 curl.exe -s -o NUL "${OMNI}/api/monitoring/health"
 if errorlevel 1 (
   echo.
-  echo [ERROR] OmniRoute offline.
-  echo Сначала запусти FreeClaude.exe — он поднимает OmniRoute.
-  echo Не запускаем OmniRoute отдельно, чтобы он не висел сиротой.
-  echo.
-  pause
-  exit /b 1
-)
-
-if not exist "%OMNIROUTE%" (
-  echo [ERROR] omniroute.cmd not found
+  echo [ERROR] OmniRoute offline. Launch FreeClaude first.
   pause
   exit /b 1
 )
@@ -976,8 +1057,44 @@ if not "%EC%"=="0" (
 )
 exit /b %EC%
 `;
+  } else {
+    script = `#!/usr/bin/env bash
+set -e
+
+export ANTHROPIC_AUTH_TOKEN="${token}"
+export OMNIROUTE_API_KEY="${token}"
+export PATH="/opt/homebrew/bin:/usr/local/bin:${nodeDir()}:$PATH"
+
+echo "Model: ${model}"
+echo "Starting Claude Code..."
+
+if ! curl -s -o /dev/null "${OMNI}/api/monitoring/health" 2>/dev/null; then
+  echo "[ERROR] OmniRoute offline. Open the FreeClaude panel first."
+  exit 1
+fi
+
+OMNIROUTE=""
+for c in omniroute /opt/homebrew/bin/omniroute /usr/local/bin/omniroute; do
+  if command -v "$c" &>/dev/null 2>&1; then
+    OMNIROUTE="$c"
+    break
+  fi
+done
+if [ -z "$OMNIROUTE" ]; then
+  echo "[ERROR] omniroute not found in PATH"
+  exit 1
+fi
+
+exec "$OMNIROUTE" launch --profile active-freeclaude --token "$ANTHROPIC_AUTH_TOKEN" "$@"
+`;
+  }
+
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(FREECLAUDE, bat);
+  fs.writeFileSync(FREECLAUDE, script);
+  if (!isWin) {
+    try { fs.chmodSync(FREECLAUDE, 0o755); } catch { /* ignore */ }
+  }
+
 }
 
 function writeSettings(model, token) {
@@ -1164,8 +1281,16 @@ async function getSetupStatus() {
     }
   }
 
-  const omniPath = path.join(NPM_BIN, "omniroute.cmd");
-  const claudePath = path.join(NPM_BIN, "claude.cmd");
+  const isWin = process.platform === "win32";
+  const omniName = isWin ? "omniroute.cmd" : "omniroute";
+  const claudeName = isWin ? "claude.cmd" : "claude";
+
+  const omniExists = Boolean(
+    whereOnPath(omniName) ||
+      whichExists(path.join(NPM_BIN, omniName)) ||
+      whichExists(path.join(NPM_BIN, "node_modules", "omniroute", "bin", "omniroute.mjs")) ||
+      whereOnPath("omniroute")
+  );
   const token = readToken();
   const omniRunning = await isOmniUp();
   const claudeOk = isClaudeCodeReady();
@@ -1176,12 +1301,12 @@ async function getSetupStatus() {
       detail: nodeVersion ? `${nodeVersion}${nodeBin ? ` · ${nodeBin}` : ""}` : "не найден",
     },
     npm: { ok: Boolean(npmBin), detail: npmBin || "не найден" },
-    omniroute: { ok: whichExists(omniPath), detail: whichExists(omniPath) ? "установлен" : "не установлен" },
+    omniroute: { ok: omniExists, detail: omniExists ? "установлен" : "не установлен" },
     claude: {
       ok: claudeOk,
       detail: claudeOk
         ? "установлен"
-        : whichExists(claudePath)
+        : (isWin && whichExists(path.join(NPM_BIN, claudeName)))
           ? "битый stub — нужен win32 binary"
           : "не установлен",
     },
@@ -1209,13 +1334,22 @@ async function installAll() {
     let nodeBin = resolveNode();
     let npmBin = resolveNpm();
     if (!nodeBin) {
-      pushLog("Устанавливаю Node.js через winget…");
-      if (!whichExists(WINGET)) throw new Error("winget не найден. Установи Node.js вручную с nodejs.org");
-      await runCmd(WINGET, ["install", "-e", "--id", "OpenJS.NodeJS.LTS", "--accept-package-agreements", "--accept-source-agreements"], {
-        timeout: 1000 * 60 * 15,
-        liveLog: true,
-        track: true,
-      });
+      pushLog("Устанавливаю Node.js…");
+      if (process.platform === "win32") {
+        if (!whichExists(WINGET)) throw new Error("winget не найден. Установи Node.js вручную с nodejs.org");
+        await runCmd(WINGET, ["install", "-e", "--id", "OpenJS.NodeJS.LTS", "--accept-package-agreements", "--accept-source-agreements"], {
+          timeout: 1000 * 60 * 15,
+          liveLog: true,
+          track: true,
+        });
+      } else {
+        const brew = whereOnPath("brew");
+        if (brew) {
+          await runCmd(brew, ["install", "node"], { timeout: 1000 * 60 * 15, liveLog: true, track: true });
+        } else {
+          throw new Error("Node.js не найден. Установи Node.js с https://nodejs.org");
+        }
+      }
       invalidateToolCache();
       _winPathCache = null;
       nodeBin = resolveNode();
@@ -1230,13 +1364,19 @@ async function installAll() {
       invalidateToolCache();
       npmBin = resolveNpm();
     }
-    if (!npmBin) throw new Error("npm.cmd не найден. Перезапусти FreeClaude или добавь Node в PATH.");
+    if (!npmBin) throw new Error("npm не найден. Перезапусти FreeClaude или добавь Node в PATH.");
 
-    const omniPath = path.join(NPM_BIN, "omniroute.cmd");
-    const claudePath = path.join(NPM_BIN, "claude.cmd");
+    const isWin = process.platform === "win32";
+    const omniName = isWin ? "omniroute.cmd" : "omniroute";
+    const omniExists = Boolean(
+      whereOnPath(omniName) ||
+        whichExists(path.join(NPM_BIN, omniName)) ||
+        whichExists(path.join(NPM_BIN, "node_modules", "omniroute", "bin", "omniroute.mjs")) ||
+        whereOnPath("omniroute")
+    );
 
     installState.step = "omniroute";
-    if (!whichExists(omniPath)) {
+    if (!omniExists) {
       pushLog("Устанавливаю OmniRoute (npm i -g omniroute)…");
       await runCmd(
         npmBin,
@@ -1371,9 +1511,19 @@ function mime(file) {
 
 function findBrowser() {
   const candidates = [
+    // macOS
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    "/Applications/Arc.app/Contents/MacOS/Arc",
+    // Windows
     path.join(process.env.ProgramFiles || "", "Google\\Chrome\\Application\\chrome.exe"),
     path.join(process.env.ProgramFiles || "", "Microsoft\\Edge\\Application\\msedge.exe"),
     path.join(process.env["ProgramFiles(x86)"] || "", "Microsoft\\Edge\\Application\\msedge.exe"),
+    // Linux
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/chromium",
   ];
   return candidates.find((p) => fs.existsSync(p)) || null;
 }
@@ -1522,16 +1672,19 @@ const server = http.createServer(async (req, res) => {
         const keys = omniKeys.listApiKeys().map(({ key, ...rest }) => rest);
         return send(res, 200, { keys, activeMasked: maskToken(readToken()) });
       } catch (err) {
-        return send(res, 500, { error: String(err.message || err) });
+        return send(res, 200, { keys: [], activeMasked: maskToken(readToken()) });
       }
     }
 
     if (req.method === "GET" && u.pathname === "/api/quota") {
       try {
         const token = readToken();
-        const usage = token
-          ? omniKeys.getKeyUsage(token)
-          : { found: false, masked: "", usedTokens: 0, remaining: null, unlimited: true, requests: 0, todayTokens: 0 };
+        let usage = { found: false, masked: "", usedTokens: 0, remaining: null, unlimited: true, requests: 0, todayTokens: 0 };
+        try {
+          if (token) usage = omniKeys.getKeyUsage(token);
+        } catch {
+          /* DB not initialized yet */
+        }
         let soonest = 0;
         try {
           const h = await fetch(`${OMNI}/api/monitoring/health`, { signal: AbortSignal.timeout(2500) });
@@ -1542,7 +1695,12 @@ const server = http.createServer(async (req, res) => {
         } catch {
           /* ignore */
         }
-        const account = omniKeys.getAccountLimitInfo();
+        let account = { connected: false, limited: false };
+        try {
+          account = omniKeys.getAccountLimitInfo();
+        } catch {
+          /* DB not initialized yet */
+        }
         // soonestRetryAfterMs у OmniRoute бывает от старых Kiro-сессий —
         // применяем только если активный аккаунт реально в лимите
         if (soonest > 0 && account.limited) {
@@ -1550,7 +1708,7 @@ const server = http.createServer(async (req, res) => {
           if (!account.resetAt || soonestAt > account.resetAt) {
             account.resetAt = soonestAt;
             account.resetInMs = soonest;
-            account.resetInText = omniKeys.formatDuration(soonest);
+            account.resetInText = omniKeys.formatDuration ? omniKeys.formatDuration(soonest) : `${Math.round(soonest / 1000)}s`;
           }
         } else if (account.resetInMs > 0 && !account.resetAt) {
           account.resetAt = Date.now() + account.resetInMs;
@@ -1562,7 +1720,12 @@ const server = http.createServer(async (req, res) => {
           serverNow: Date.now(),
         });
       } catch (err) {
-        return send(res, 500, { error: String(err.message || err) });
+        return send(res, 200, {
+          activeKey: maskToken(readToken()),
+          usage: { found: false, masked: "", usedTokens: 0, remaining: null, unlimited: true, requests: 0, todayTokens: 0 },
+          account: { connected: false, limited: false },
+          serverNow: Date.now(),
+        });
       }
     }
 
@@ -1767,10 +1930,11 @@ const server = http.createServer(async (req, res) => {
       }
       writeSettings(model, token);
 
-      const launcher = path.join(DATA_DIR, "launch-claude.cmd");
-      fs.writeFileSync(
-        launcher,
-        `@echo off
+      if (process.platform === "win32") {
+        const launcher = path.join(DATA_DIR, "launch-claude.cmd");
+        fs.writeFileSync(
+          launcher,
+          `@echo off
 setlocal EnableExtensions
 set "PATH=${nodeDir().replace(/\\/g, "\\\\")};%APPDATA%\\npm;%PATH%"
 title Claude Code - ${model}
@@ -1781,15 +1945,56 @@ echo.
 call "${FREECLAUDE}"
 if errorlevel 1 pause
 `
-      );
+        );
 
-      spawn("cmd.exe", ["/c", "start", "Claude Code", "cmd.exe", "/k", launcher], {
-        detached: true,
-        stdio: "ignore",
-        windowsHide: false,
-        cwd: DATA_DIR,
-        env: { ...process.env, PATH: `${nodeDir()};${NPM_BIN};${enrichedPath()}` },
-      }).unref();
+        spawn("cmd.exe", ["/c", "start", "Claude Code", "cmd.exe", "/k", launcher], {
+          detached: true,
+          stdio: "ignore",
+          windowsHide: false,
+          cwd: DATA_DIR,
+          env: { ...process.env, PATH: `${nodeDir()};${NPM_BIN};${enrichedPath()}` },
+        }).unref();
+      } else if (process.platform === "darwin") {
+        const launcher = path.join(DATA_DIR, "launch-claude.sh");
+        fs.writeFileSync(
+          launcher,
+          `#!/bin/bash
+export PATH="${nodeDir()}:${NPM_BIN}:${enrichedPath()}"
+echo ""
+echo "Model: ${model}"
+echo "Starting Claude Code..."
+echo ""
+"${FREECLAUDE}"
+`,
+          { mode: 0o755 }
+        );
+        spawn("open", ["-a", "Terminal", launcher], {
+          detached: true,
+          stdio: "ignore",
+          cwd: DATA_DIR,
+          env: { ...process.env, PATH: `${nodeDir()}:${NPM_BIN}:${enrichedPath()}` },
+        }).unref();
+      } else {
+        const launcher = path.join(DATA_DIR, "launch-claude.sh");
+        fs.writeFileSync(
+          launcher,
+          `#!/bin/bash
+export PATH="${nodeDir()}:${NPM_BIN}:${enrichedPath()}"
+echo ""
+echo "Model: ${model}"
+echo "Starting Claude Code..."
+echo ""
+"${FREECLAUDE}"
+`,
+          { mode: 0o755 }
+        );
+        spawn("x-terminal-emulator", ["-e", launcher], {
+          detached: true,
+          stdio: "ignore",
+          cwd: DATA_DIR,
+          env: { ...process.env, PATH: `${nodeDir()}:${NPM_BIN}:${enrichedPath()}` },
+        }).unref();
+      }
 
       return send(res, 200, { ok: true, model });
     }
@@ -1892,10 +2097,15 @@ async function main() {
     openWindow();
 
     try {
-      if (
-        whichExists(path.join(NPM_BIN, "omniroute.cmd")) ||
-        whichExists(path.join(NPM_BIN, "node_modules", "omniroute", "bin", "omniroute.mjs"))
-      ) {
+      const isWin = process.platform === "win32";
+      const omniBin = whereOnPath(isWin ? "omniroute.cmd" : "omniroute");
+      const mjsCandidates = [
+        path.join(NPM_BIN, "node_modules", "omniroute", "bin", "omniroute.mjs"),
+        "/opt/homebrew/lib/node_modules/omniroute/bin/omniroute.mjs",
+        "/usr/local/lib/node_modules/omniroute/bin/omniroute.mjs",
+      ];
+      const hasOmni = Boolean(omniBin || mjsCandidates.some((f) => fs.existsSync(f)));
+      if (hasOmni) {
         const ok = await ensureOmni();
         if (ok) {
           console.log("OmniRoute online");

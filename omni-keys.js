@@ -1,8 +1,9 @@
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 const crypto = require("crypto");
 
-const DB_PATH = path.join(process.env.USERPROFILE || "", ".omniroute", "storage.sqlite");
+const DB_PATH = path.join(process.env.USERPROFILE || os.homedir(), ".omniroute", "storage.sqlite");
 
 function getDb(readonly = false) {
   const candidates = [

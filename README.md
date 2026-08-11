@@ -11,6 +11,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white" alt="Windows" />
+  <img src="https://img.shields.io/badge/macOS-12%2B-000000?logo=apple&logoColor=white" alt="macOS" />
   <img src="https://img.shields.io/badge/Node.js-22%2B-339933?logo=nodedotjs&logoColor=white" alt="Node" />
   <img src="https://img.shields.io/badge/Release-v1.0.3-7c6cff" alt="Release" />
   <img src="https://img.shields.io/badge/License-MIT-green" alt="MIT" />
@@ -105,6 +106,15 @@ assets/            # media
 - Data: `%APPDATA%\FreeClaude`, `~\.omniroute`, `~\.claude`
 - Password env: `OMNIROUTE_PASSWORD` / `INITIAL_PASSWORD` (default `CHANGEME`)
 - Don’t commit personal keys
+
+---
+
+## 🤝 Contributors
+
+| | |
+|---|---|
+| [@kolevans](https://github.com/kolevans) | Creator & maintainer |
+| [@Azamaperdeev05](https://github.com/Azamaperdeev05) | macOS support: bash launcher, cross-platform fixes, crypto module fix |
 
 ---
 

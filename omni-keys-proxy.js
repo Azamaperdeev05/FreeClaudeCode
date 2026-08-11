@@ -46,6 +46,8 @@ function formatDuration(ms) {
   return `${sec}с`;
 }
 
+const os = require("os");
+
 module.exports = {
   createApiKey: (name) => call("createApiKey", [name]),
   ensureApiKey: (name) => call("ensureApiKey", [name]),
@@ -57,5 +59,5 @@ module.exports = {
   healKiroConnections: () => call("healKiroConnections"),
   hasKiroCredentials: () => call("hasKiroCredentials"),
   formatDuration,
-  DB_PATH: path.join(process.env.USERPROFILE || "", ".omniroute", "storage.sqlite"),
+  DB_PATH: path.join(process.env.USERPROFILE || os.homedir(), ".omniroute", "storage.sqlite"),
 };
