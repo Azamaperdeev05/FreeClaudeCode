@@ -1,0 +1,25 @@
+# Dependencies & build artifacts
+node_modules/
+_release_stage/
+dist-out/
+dist-release/
+*.exe
+*.zip
+*.rar
+
+# Local / personal data
+config.json
+*_auth.json
+*_poll.json
+.env
+.env.*
+
+# OS & editor
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/
+
+# npm debug
+npm-debug.log*

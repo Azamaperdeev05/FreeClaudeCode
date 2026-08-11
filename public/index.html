@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FreeClaude</title>
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
+  <!-- CSS is inlined by the server into #fc-css so F5 cannot load HTML without styles. -->
+  <link rel="stylesheet" href="/styles.css?v=29" />
+  <style id="fc-critical">
+    html, body { margin: 0; min-height: 100%; background: #0b0d12; color: #eef2f8; font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif; }
+    .hidden { display: none !important; }
+    .app { min-height: 100vh; display: grid; grid-template-columns: 220px 1fr; }
+    .sidebar { border-right: 1px solid #2a3140; background: #0e1118; padding: 22px 14px; }
+    .main { padding: 28px clamp(18px, 3vw, 36px) 40px; }
+  </style>
+</head>
+<body>
+  <div class="app" id="appRoot">
+    <aside class="sidebar">
+      <div class="brand">
+        <strong>FreeClaude</strong>
+      </div>
+      <nav class="nav">
+        <button class="nav-btn on" data-tab="home" type="button">Главная</button>
+        <button class="nav-btn" data-tab="models" type="button">Модели</button>
+        <button class="nav-btn" data-tab="setup" type="button">Настройки</button>
+      </nav>
+      <div class="side-bottom">
+        <div class="side-foot" id="sideStatus"><span class="status-ico pending" aria-hidden="true"></span><span id="sideStatusText">—</span></div>
+        <a class="btn-creator" href="https://t.me/loveaideep" target="_blank" rel="noopener noreferrer">Создатель</a>
+      </div>
+    </aside>
+
+    <main class="main">
+      <section class="tab" id="tab-home">
+        <div class="home">
+          <header class="home-hero">
+            <p class="home-kicker">FreeClaude</p>
+            <h1>Claude Code бесплатно<br />на твоём ПК</h1>
+            <p class="home-lead">Проект для упрощения работы с Claude</p>
+            <div class="home-cta">
+              <button class="btn launch" type="button" data-go="setup">Настроить</button>
+              <button class="btn ghost" type="button" data-go="models">Модели</button>
+            </div>
+          </header>
+        </div>
+      </section>
+
+      <section class="tab hidden" id="tab-models">
+        <header class="page-head">
+          <div>
+            <h1>Модели</h1>
+            <p id="connSub" class="status-line"><span class="status-ico pending" aria-hidden="true"></span><span id="connSubText">Проверка OmniRoute…</span></p>
+          </div>
+          <div class="page-actions">
+            <button id="btnBoot" class="btn ghost" type="button">Стек</button>
+            <button id="btnRefresh" class="btn ghost" type="button">Обновить</button>
+            <button id="btnLaunch" class="btn launch" type="button" disabled>Открыть Claude</button>
+          </div>
+        </header>
+
+        <div id="activeBar" class="active-bar hidden">
+          <div class="active-bar-left">
+            <div class="icon active-bar-icon" id="activeBarIcon" aria-hidden="true"></div>
+            <div class="active-bar-main">
+              <div class="active-title">Активная модель</div>
+              <div class="active-model" id="activeBarModel">—</div>
+            </div>
+          </div>
+          <button id="btnLaunchBar" class="btn launch" type="button">Открыть Claude</button>
+        </div>
+
+        <div class="conn-card compact">
+          <div class="conn-left">
+            <span class="dot" id="connDot"></span>
+            <div>
+              <strong>Kiro · OmniRoute</strong>
+              <div class="conn-meta" id="connMeta">—</div>
+            </div>
+          </div>
+          <span class="tag soft" id="modelTag">не выбрана</span>
+        </div>
+
+        <div class="toolbar">
+          <div class="toolbar-row">
+            <input id="search" type="search" placeholder="Поиск моделей…" />
+          </div>
+        </div>
+
+        <div id="limitBanner" class="limit-banner hidden" aria-live="polite">
+          <div class="limit-banner-body">
+            <div class="limit-banner-title" id="limitBannerTitle">Лимит Kiro</div>
+            <div class="limit-banner-timer" id="limitTimer">—</div>
+            <div class="limit-banner-hint" id="limitBannerHint">Поменяйте аккаунт или дождитесь снятия лимита</div>
+          </div>
+          <button id="btnLimitSwitch" class="btn accent" type="button">Сменить аккаунт</button>
+        </div>
+
+        <div id="grid" class="grid"><div class="empty">Загрузка…</div></div>
+      </section>
+
+      <section class="tab hidden" id="tab-setup">
+        <header class="page-head">
+          <div>
+            <h1>Настройки</h1>
+            <p>Компоненты, ключ и аккаунт Kiro</p>
+          </div>
+          <button id="btnInstallAll" class="btn accent" type="button">Установить недостающее</button>
+        </header>
+
+        <div class="check-grid" id="checkGrid"></div>
+
+        <div class="key-box">
+          <div class="key-head">
+            <div>
+              <label for="apiKey">API-ключ</label>
+              <div class="key-current" id="keyCurrent">—</div>
+            </div>
+            <div class="key-actions">
+              <button id="btnOpenKiro" class="btn ghost" type="button">Войти в Kiro</button>
+              <button id="btnAwsSignOut" class="btn ghost hidden" type="button" title="Сбросить сессию AWS Builder ID">Выйти из AWS</button>
+              <button id="btnGenKey" class="btn launch" type="button" disabled title="Сначала войди в Kiro">Получить ключ</button>
+            </div>
+          </div>
+          <div class="key-inputs">
+            <input id="apiKey" type="password" placeholder="или вставь sk-…" autocomplete="off" />
+            <button id="btnSaveKey" class="btn okish" type="button">Сохранить</button>
+          </div>
+          <div class="usage-row" id="usageRow">
+            <div class="usage-item"><span>Использовано</span><strong id="usageUsed">—</strong></div>
+            <div class="usage-item"><span>Осталось</span><strong id="usageLeft">—</strong></div>
+            <div class="usage-item"><span>Запросов</span><strong id="usageReq">—</strong></div>
+            <div class="usage-item"><span>За 24ч</span><strong id="usageToday">—</strong></div>
+          </div>
+          <div class="account-limit" id="accountLimit">
+            <div class="al-title">Аккаунт Kiro</div>
+            <div class="al-state" id="accountState">—</div>
+            <div class="al-meta" id="accountMeta">—</div>
+          </div>
+        </div>
+
+        <div id="installLogWrap" class="install-log-wrap hidden">
+          <div class="install-log-head">
+            <div class="install-log-title">Лог установки</div>
+            <div class="install-log-actions">
+              <button id="btnStopInstall" class="btn ghost small danger hidden" type="button">Остановить</button>
+            </div>
+          </div>
+          <pre id="installLog" class="install-log"></pre>
+        </div>
+      </section>
+
+      <footer class="foot" id="foot"></footer>
+    </main>
+  </div>
+
+  <div id="updateLock" class="update-lock hidden" aria-hidden="true">
+    <div class="update-card">
+      <h1>Вышло обновление</h1>
+      <p>Скачайте новую версию в Telegram</p>
+      <a id="btnUpdateTg" class="btn launch" href="https://t.me/loveaideep" target="_blank" rel="noopener noreferrer">Telegram</a>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <div id="kiroModal" class="modal hidden" aria-hidden="true">
+    <div class="modal-backdrop" data-kiro-close></div>
+    <div class="modal-card" role="dialog" aria-labelledby="kiroModalTitle">
+      <div class="modal-head">
+        <div>
+          <h2 id="kiroModalTitle">Вход в Kiro · AWS Builder ID</h2>
+          <p class="modal-sub">Подтверди код в окне AWS — FreeClaude сам дождётся входа.</p>
+        </div>
+        <button type="button" class="modal-x" data-kiro-close aria-label="Закрыть">×</button>
+      </div>
+      <div class="kiro-code-box">
+        <div class="kiro-code-label">Код устройства</div>
+        <div class="kiro-code" id="kiroUserCode">————</div>
+        <div class="kiro-status" id="kiroStatus">Ожидание…</div>
+      </div>
+      <div class="kiro-wait" id="kiroWait">
+        <div class="kiro-spinner" aria-hidden="true"></div>
+        <div class="kiro-wait-title" id="kiroWaitTitle">Ждём вход в AWS…</div>
+        <div class="kiro-wait-sub" id="kiroWaitSub">Откроется чистое окно AWS без старой сессии — можно войти другим аккаунтом. После «Request approved» статус обновится сам.</div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn ghost" id="btnKiroOpenAws">Открыть / обновить AWS</button>
+        <button type="button" class="btn ghost" data-kiro-close>Отмена</button>
+        <button type="button" class="btn accent" id="btnKiroRetry" disabled>Ждём…</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js?v=35"></script>
+</body>
+</html>
