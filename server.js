@@ -97,10 +97,25 @@ function npmBinDir() {
 }
 
 function omniCmdPath() {
+  if (process.platform !== "win32") {
+    // macOS / Linux: check homebrew and system paths
+    for (const p of ["/opt/homebrew/bin/omniroute", "/usr/local/bin/omniroute"]) {
+      if (fs.existsSync(p)) return p;
+    }
+    const wh = require("child_process").spawnSync("which", ["omniroute"], { encoding: "utf8" });
+    if (wh.stdout && wh.stdout.trim()) return wh.stdout.trim();
+  }
   return manualPath("omniroute", "omniroute.cmd") || path.join(npmBinDir(), "omniroute.cmd");
 }
 
 function claudeCmdPath() {
+  if (process.platform !== "win32") {
+    for (const p of ["/opt/homebrew/bin/claude", "/usr/local/bin/claude"]) {
+      if (fs.existsSync(p)) return p;
+    }
+    const wh = require("child_process").spawnSync("which", ["claude"], { encoding: "utf8" });
+    if (wh.stdout && wh.stdout.trim()) return wh.stdout.trim();
+  }
   return manualPath("claude", "claude.cmd") || path.join(npmBinDir(), "claude.cmd");
 }
 
@@ -826,6 +841,15 @@ function whichExists(file) {
 }
 
 function omniModuleEntry() {
+  // macOS global install location (homebrew)
+  if (process.platform !== "win32") {
+    for (const p of [
+      "/opt/homebrew/lib/node_modules/omniroute/bin/omniroute.mjs",
+      "/usr/local/lib/node_modules/omniroute/bin/omniroute.mjs",
+    ]) {
+      if (fs.existsSync(p)) return p;
+    }
+  }
   return path.join(npmBinDir(), "node_modules", "omniroute", "bin", "omniroute.mjs");
 }
 
@@ -1016,6 +1040,7 @@ function killOrphanOmniRoute() {
 
 function spawnOmniRouteWatcher() {
   if (process.env.FREECLAUDE_NO_WATCHDOG === "1") return;
+  if (process.platform !== "win32") return; // powershell watcher is Windows-only
   const parentPid = process.pid;
   const scriptPath = path.join(os.tmpdir(), `freeclaude-omni-watcher-${parentPid}.ps1`);
   const script = `
