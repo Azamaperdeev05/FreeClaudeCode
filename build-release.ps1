@@ -75,10 +75,14 @@ $sources = @(
 foreach ($f in $sources) { Copy-Item (Join-Path $root $f) $stage }
 Copy-Item (Join-Path $root "public") (Join-Path $stage "public") -Recurse
 
+# A flaky registry connection makes npm abort with "Exit handler never called". Serving
+# what is already cached keeps a rebuild working offline and survives ECONNRESET storms.
+$npmFlags = @("--no-fund", "--no-audit", "--prefer-offline", "--fetch-retries=5", "--fetch-retry-maxtimeout=120000")
+
 Set-Location $stage
 Write-Host "`n[1/4] npm install..." -ForegroundColor Yellow
-Invoke-Checked "npm ci" { & $node $npmCli ci --omit=dev --no-fund --no-audit }
-Invoke-Checked "npm install pkg" { & $node $npmCli install --no-save --no-fund --no-audit "@yao-pkg/pkg@6.3.2" }
+Invoke-Checked "npm ci" { & $node $npmCli ci --omit=dev @npmFlags }
+Invoke-Checked "npm install pkg" { & $node $npmCli install --no-save @npmFlags "@yao-pkg/pkg@6.3.2" }
 
 Write-Host "`n[2/4] obfuscate... SKIPPED (breaks pkg runtime)" -ForegroundColor Yellow
 # Identifier obfuscation caused ACCESS_VIOLATION in pkg builds.
@@ -104,7 +108,7 @@ $runtimePkg = @{
 Set-Content -Path (Join-Path $out "package.json") -Value $runtimePkg -Encoding UTF8
 Push-Location $out
 try {
-  Invoke-Checked "runtime npm install" { & $node $npmCli install --omit=dev --no-fund --no-audit }
+  Invoke-Checked "runtime npm install" { & $node $npmCli install --omit=dev @npmFlags }
 } finally {
   Pop-Location
 }

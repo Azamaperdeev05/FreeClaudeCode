@@ -674,6 +674,9 @@ async function finishKiroSuccess(r) {
   setKiroWait("done", "Готово", "Kiro подключён. Подтягиваю модели…");
   toast("Kiro подключён");
   kiroAuth.active = false;
+  // AWS approved the device code, so the account is connected even if the status/quota
+  // calls below fail. Without this the key step below would repaint the UI as logged out.
+  updateAuthButtons(true);
   if (els.btnKiroRetry) {
     els.btnKiroRetry.disabled = false;
     els.btnKiroRetry.textContent = "Готово";
@@ -1031,7 +1034,6 @@ async function saveKey() {
 async function generateKey() {
   if (!state.kiroConnected) {
     toast("Сначала войди в Kiro", true);
-    updateAuthButtons(false);
     return;
   }
   els.btnGenKey.disabled = true;

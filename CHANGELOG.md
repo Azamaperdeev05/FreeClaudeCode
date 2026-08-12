@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.5 — 2026-08-12
+
+Fixes three regressions from 1.0.4.
+
+- `ANTHROPIC_BASE_URL` is written to the Claude Code settings again. Removing the
+  bypass proxy took it out with it, so running `claude` from a terminal sent the
+  OmniRoute key to api.anthropic.com and every request came back as an API error.
+  Launching from the app still worked because `omniroute launch` sets it itself,
+  which is why this only showed up for people starting Claude Code by hand.
+- Dropped the hard "Node.js 22+ required" refusal in the SQLite bridge. `better-sqlite3`
+  declares that engine but its N-API addon loads on older runtimes, and refusing up
+  front broke key and account lookups on Node 20 — the login succeeded while the UI
+  kept saying no account was connected. The version is now only mentioned if the
+  bridge actually fails.
+- A successful Kiro login no longer repaints the UI as logged out. Issuing the key
+  runs before the first status refresh, and its "войди в Kiro" guard was resetting
+  the auth buttons.
+- `is_active` missing from an OmniRoute `api_keys` schema no longer marks every key
+  revoked, which made each call create another duplicate key.
+
 ## 1.0.4 — 2026-08-12
 
 ### Security

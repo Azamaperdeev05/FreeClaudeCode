@@ -9,7 +9,12 @@ const { resolveNode, nodeMajorVersion } = require("./node-resolve");
 
 const EXE_DIR = path.dirname(process.execPath);
 const BRIDGE = path.join(EXE_DIR, "sqlite-bridge.js");
-const MIN_NODE_MAJOR = 22;
+/**
+ * better-sqlite3 declares node>=22, but its prebuilt addon is N-API and usually loads on
+ * older runtimes too. Refusing up front turned working setups into a dead UI, so the
+ * version is only mentioned if the bridge actually fails.
+ */
+const HINT_NODE_MAJOR = 22;
 const CALL_TIMEOUT_MS = 20000;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 
@@ -23,13 +28,16 @@ function requireNode() {
     throw new Error("Node.js не найден. Установи Node.js 22+ — он нужен для OmniRoute и ключей.");
   }
 
-  const major = nodeMajorVersion(node);
-  if (major !== null && major < MIN_NODE_MAJOR) {
-    throw new Error(`Нужен Node.js ${MIN_NODE_MAJOR}+, а найден ${major}. Обнови Node.js.`);
-  }
-
   _checkedNode = node;
   return node;
+}
+
+function withNodeHint(node, message) {
+  const major = nodeMajorVersion(node);
+  if (major !== null && major < HINT_NODE_MAJOR) {
+    return `${message} (найден Node.js ${major}, рекомендуется ${HINT_NODE_MAJOR}+)`;
+  }
+  return message;
 }
 
 function call(fn, args = []) {
@@ -52,7 +60,7 @@ function call(fn, args = []) {
     if (r.error.code === "ETIMEDOUT") {
       throw new Error("База OmniRoute не отвечает (возможно, занята). Попробуй ещё раз.");
     }
-    throw new Error(`Не удалось запустить sqlite-bridge: ${r.error.message}`);
+    throw new Error(withNodeHint(node, `Не удалось запустить sqlite-bridge: ${r.error.message}`));
   }
 
   const out = String(r.stdout || "").trim();
@@ -66,7 +74,7 @@ function call(fn, args = []) {
     } catch {
       /* keep raw output as the message */
     }
-    throw new Error(msg);
+    throw new Error(withNodeHint(node, msg));
   }
 
   if (!out) return null;

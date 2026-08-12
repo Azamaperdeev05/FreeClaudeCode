@@ -181,6 +181,7 @@ function ensureApiKey(name = "freeclaude") {
 
 function readApiKeys(db) {
   // OmniRoute schemas vary between versions, so only select columns that exist.
+  const present = new Set(tableColumns(db, "api_keys"));
   const cols = buildSelectColumns(db, "api_keys", {
     id: "id",
     name: "name",
@@ -191,7 +192,7 @@ function readApiKeys(db) {
     is_active: "isActive",
     revoked_at: "revokedAt",
   });
-  const order = tableColumns(db, "api_keys").includes("created_at") ? " ORDER BY created_at DESC" : "";
+  const order = present.has("created_at") ? " ORDER BY created_at DESC" : "";
   return db
     .prepare(`SELECT ${cols} FROM api_keys${order} LIMIT 50`)
     .all()
@@ -203,7 +204,9 @@ function readApiKeys(db) {
       createdAt: r.createdAt,
       expiresAt: r.expiresAt,
       lastUsedAt: r.lastUsedAt,
-      isActive: Boolean(r.isActive) && !r.revokedAt,
+      // A column the schema does not have must not mean "revoked" — otherwise every key
+      // looks dead and ensureApiKey creates a duplicate on each call.
+      isActive: (present.has("is_active") ? Boolean(r.isActive) : true) && !r.revokedAt,
     }));
 }
 

@@ -964,6 +964,8 @@ function writeSettings(model, token) {
     $schema: "https://json.schemastore.org/claude-code-settings.json",
     model,
     env: {
+      // Without this Claude Code talks to api.anthropic.com and rejects the OmniRoute key.
+      ANTHROPIC_BASE_URL: OMNI,
       ANTHROPIC_AUTH_TOKEN: token,
       ANTHROPIC_MODEL: model,
       ANTHROPIC_SMALL_FAST_MODEL: haiku,
