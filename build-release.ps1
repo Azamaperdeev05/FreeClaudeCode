@@ -23,16 +23,16 @@ function Resolve-NodeExe {
     )) {
     if (Test-Path $candidate) { return $candidate }
   }
-  throw "Node.js не найден. Установи Node.js 22+ или добавь node.exe в PATH."
+  throw "Node.js not found. Install Node.js 22+ or add node.exe to PATH."
 }
 
 $node = Resolve-NodeExe
 $nodeHome = Split-Path $node -Parent
 $npmCli = Join-Path $nodeHome "node_modules\npm\bin\npm-cli.js"
-if (-not (Test-Path $npmCli)) { throw "npm-cli.js не найден рядом с $node" }
+if (-not (Test-Path $npmCli)) { throw "npm-cli.js not found next to $node" }
 
 $nodeMajor = [int]((& $node -p "process.versions.node.split('.')[0]").Trim())
-if ($nodeMajor -lt 22) { throw "Нужен Node.js 22+, а найден $nodeMajor ($node)" }
+if ($nodeMajor -lt 22) { throw "Need Node.js 22+, found $nodeMajor ($node)" }
 
 $version = (Get-Content (Join-Path $root "package.json") -Raw | ConvertFrom-Json).version
 
@@ -45,7 +45,7 @@ Write-Host "out:     $out"
 # A running exe keeps its file locked and would make Remove-Item fail with a raw error.
 $running = Get-Process -Name FreeClaude -ErrorAction SilentlyContinue
 if ($running) {
-  Write-Host "`nFreeClaude.exe запущен — закрываю перед сборкой..." -ForegroundColor Yellow
+  Write-Host "`nFreeClaude.exe is running - closing it before build..." -ForegroundColor Yellow
   $running | Stop-Process -Force
   Start-Sleep -Seconds 2
 }
@@ -55,7 +55,7 @@ if (Test-Path $out) {
   try {
     Remove-Item $out -Recurse -Force
   } catch {
-    throw "Не удалось очистить $out (файл занят?). Закрой FreeClaude и проводник в этой папке. $_"
+    throw "Could not clear $out (file locked?). Close FreeClaude and Explorer in that folder. $_"
   }
 }
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
@@ -131,17 +131,17 @@ exit /b 0
 FreeClaude $version
 ==========
 
-Запуск: двойной клик по FreeClaude.exe
-(одна программа — сайт + OmniRoute в фоне + браузер)
+Run: double-click FreeClaude.exe
+(one process - UI + OmniRoute in the background)
 
-Адрес: http://127.0.0.1:3847
+Open: http://127.0.0.1:3847
 
-На чистой Windows: Настройки → «Установить недостающее»
+On a clean Windows: Settings -> Install missing
 (Node.js, OmniRoute, Claude Code).
 
-Требуется Node.js 22+ (для работы с ключами OmniRoute).
+Needs Node.js 22+ (for OmniRoute keys).
 
-Данные: %APPDATA%\FreeClaude
+Data: %APPDATA%\FreeClaude
 "@ | Set-Content -Encoding UTF8 (Join-Path $out "README.txt")
 
 Remove-Item (Join-Path $out "package.json") -Force -ErrorAction SilentlyContinue
@@ -160,10 +160,10 @@ $required = @(
 )
 foreach ($rel in $required) {
   $p = Join-Path $out $rel
-  if (-not (Test-Path $p)) { throw "Сборка неполная: не хватает $rel" }
+  if (-not (Test-Path $p)) { throw "Incomplete build: missing $rel" }
 }
 $exe = Get-Item (Join-Path $out "FreeClaude.exe")
-if ($exe.Length -lt 10MB) { throw "FreeClaude.exe подозрительно мал ($($exe.Length) байт)" }
+if ($exe.Length -lt 10MB) { throw "FreeClaude.exe looks too small ($($exe.Length) bytes)" }
 
 # A module missing from the pkg snapshot only shows up at runtime, and every file checked
 # above can be present while the exe dies on its first require. Boot it in self-test mode:
@@ -181,7 +181,7 @@ try {
     (Get-Content $smokeErr -Raw -ErrorAction SilentlyContinue)
   ) -join "`n"
   if ($smoke.ExitCode -ne 0 -or $smokeOut -notmatch "selftest ok") {
-    throw "FreeClaude.exe не стартует (код $($smoke.ExitCode)). Вывод:`n$smokeOut"
+    throw "FreeClaude.exe failed to start (exit $($smoke.ExitCode)). Output:`n$smokeOut"
   }
   Write-Host "  exe boots, all modules resolve" -ForegroundColor Green
 } finally {

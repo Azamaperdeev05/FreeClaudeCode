@@ -237,7 +237,7 @@ const EN = {
   "toast.error": "Error",
   "toast.httpError": "Error {status}",
   "toast.badOmniPassword":
-    "Wrong OmniRoute password. Open http://127.0.0.1:20128 — the password is often CHANGEME.",
+    "Could not sign in to the OmniRoute panel. FreeClaude will try to reset the password itself — press Sign in to Kiro again. If it still fails, open http://127.0.0.1:20128.",
   "toast.confirmClearKey": "Delete the saved API key? Claude Code will not start without it.",
   "toast.installStopped": "Installation stopped",
   "toast.installDone": "Done",
@@ -266,7 +266,7 @@ const EN = {
   "err.busy.title": "Kiro is overloaded",
   "err.busy.hint": "This is temporary on the provider side. Try again in a minute.",
   "err.offline.title": "No connection to OmniRoute",
-  "err.offline.hint": "OmniRoute is not running or crashed. Restart FreeClaude — it brings it up itself.",
+  "err.offline.hint": "OmniRoute is not running. FreeClaude starts it itself — wait a few seconds and press Refresh, or open Settings → Install missing.",
   "err.timeout.title": "The answer never came",
   "err.timeout.hint": "The request took too long. Check the internet and try again.",
   "err.rate.title": "Too many requests",
@@ -321,6 +321,8 @@ const EN = {
     "Node.js was installed but could not be found. Set the path to node.exe by hand — the gear on the Node.js card.",
   "srv.claudeNoBinary":
     "Claude Code installed without the native claude.exe. Check npm optional deps / internet and try again.",
+  "srv.claudeNotFound":
+    "Claude Code not found at {path}. Install it from Settings, or set the path with the gear icon.",
 
   "log.omniAlreadyOnline": "OmniRoute is already online",
   "log.omniStarting": "Bringing OmniRoute up…",
@@ -624,7 +626,7 @@ const RU = {
   "toast.error": "Ошибка",
   "toast.httpError": "Ошибка {status}",
   "toast.badOmniPassword":
-    "Неверный пароль OmniRoute. Открой http://127.0.0.1:20128 — часто пароль CHANGEME.",
+    "Не удалось войти в панель OmniRoute. FreeClaude сам попробует сбросить пароль — нажми «Войти в Kiro» ещё раз. Если не поможет, открой http://127.0.0.1:20128.",
   "toast.confirmClearKey": "Удалить сохранённый API-ключ? Claude Code не запустится без ключа.",
   "toast.installStopped": "Установка остановлена",
   "toast.installDone": "Готово",
@@ -653,7 +655,7 @@ const RU = {
   "err.busy.title": "Kiro перегружен",
   "err.busy.hint": "Это временно на стороне провайдера. Повтори через минуту.",
   "err.offline.title": "Нет связи с OmniRoute",
-  "err.offline.hint": "OmniRoute не запущен или упал. Перезапусти FreeClaude — он поднимает его сам.",
+  "err.offline.hint": "OmniRoute не запущен. FreeClaude поднимает его сам — подожди пару секунд и нажми Обновить, либо открой Настройки → Установить недостающее.",
   "err.timeout.title": "Ответ не дождался",
   "err.timeout.hint": "Запрос шёл слишком долго. Проверь интернет и повтори.",
   "err.rate.title": "Слишком много запросов",
@@ -708,6 +710,8 @@ const RU = {
     "Node.js поставился, но найти его не удалось. Укажи путь к node.exe вручную — шестерёнка у карточки Node.js.",
   "srv.claudeNoBinary":
     "Claude Code установился без нативного claude.exe. Проверь npm optional deps / интернет и повтори.",
+  "srv.claudeNotFound":
+    "Claude Code не найден: {path}. Установи из Настроек или укажи путь шестерёнкой.",
 
   "log.omniAlreadyOnline": "OmniRoute уже online",
   "log.omniStarting": "Поднимаю OmniRoute…",

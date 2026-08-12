@@ -200,7 +200,7 @@ function toast(msg, isErr = false) {
   } catch {
     /* keep raw */
   }
-  if (/invalid password/i.test(text)) {
+  if (/invalid password/i.test(text) && !/reset|сброс|OMNIROUTE_PASSWORD|CHANGEME/i.test(text)) {
     text = t("toast.badOmniPassword");
   }
   els.toast.textContent = text;
@@ -1190,17 +1190,21 @@ function renderAxiom(s) {
   state.lastAxiom = s;
   const enabled = Boolean(s?.enabled);
   const available = Boolean(s?.available);
+  // Persona text is not shipped in the release — hide the dead card for everyone who
+  // does not already have it, so users stop asking why the toggle does nothing.
+  if (els.axiomBox) {
+    els.axiomBox.classList.toggle("hidden", !available);
+    els.axiomBox.classList.toggle("on", enabled);
+  }
+  if (!available) return;
   if (els.axiomToggle) {
     els.axiomToggle.checked = enabled;
-    els.axiomToggle.disabled = !available;
+    els.axiomToggle.disabled = false;
   }
-  if (els.axiomBox) els.axiomBox.classList.toggle("on", enabled);
   if (els.axiomState) els.axiomState.textContent = enabled ? t("axiom.on") : t("axiom.off");
   if (els.axiomMeta) {
     const size = formatKb(s?.bytes);
-    els.axiomMeta.textContent = available
-      ? `~/.claude/CLAUDE.md${size ? ` · ${size}` : ""}`
-      : t("axiom.noPrompt");
+    els.axiomMeta.textContent = `~/.claude/CLAUDE.md${size ? ` · ${size}` : ""}`;
   }
 }
 

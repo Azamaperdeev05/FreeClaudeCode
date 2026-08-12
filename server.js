@@ -151,20 +151,44 @@ function parseEnvFile(envPath) {
 
 /** Directory of the installed omniroute npm package, or null. */
 function omniPackageDir() {
-  const dir = path.join(npmBinDir(), "node_modules", "omniroute");
-  return fs.existsSync(dir) ? dir : null;
+  const candidates = [
+    path.join(npmBinDir(), "node_modules", "omniroute"),
+    path.join(path.dirname(omniCmdPath()), "node_modules", "omniroute"),
+  ];
+  for (const dir of candidates) {
+    if (fs.existsSync(path.join(dir, "package.json"))) return dir;
+  }
+  return null;
 }
 
 /**
  * The password can live in the user's data dir or in the package's own `.env` — the
  * latter is where `INITIAL_PASSWORD` actually ships, so skipping it lost the real value.
  */
+function omniDataDirs() {
+  const dirs = [];
+  const configured = String(process.env.DATA_DIR || "").trim();
+  if (configured) dirs.push(path.resolve(configured));
+  dirs.push(path.join(os.homedir(), ".omniroute"));
+  const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+  if (appData) dirs.push(path.join(appData, "omniroute"));
+  const seen = new Set();
+  return dirs.filter((d) => {
+    const key = d.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function readOmniEnvFile() {
   const pkg = omniPackageDir();
-  return {
-    ...(pkg ? parseEnvFile(path.join(pkg, ".env")) : {}),
-    ...parseEnvFile(path.join(os.homedir(), ".omniroute", ".env")),
-  };
+  let merged = pkg ? parseEnvFile(path.join(pkg, ".env")) : {};
+  // Fresh OmniRoute installs keep data under %APPDATA%\omniroute, not ~/.omniroute.
+  for (const dir of omniDataDirs()) {
+    merged = { ...merged, ...parseEnvFile(path.join(dir, ".env")) };
+  }
+  return merged;
 }
 
 function candidateOmniPasswords() {
@@ -291,10 +315,15 @@ let omniPasswordRecovered = false;
  */
 async function recoverOmniPassword() {
   if (omniPasswordRecovered) return null;
-  omniPasswordRecovered = true;
 
   const password = generateOmniPassword();
-  runOmniPasswordReset(password);
+  try {
+    runOmniPasswordReset(password);
+  } catch (err) {
+    // Leave the flag unset so the next Kiro click can try again after OmniRoute finishes installing.
+    throw err;
+  }
+  omniPasswordRecovered = true;
   try {
     writeConfig({ omniPassword: password });
   } catch {
@@ -311,6 +340,8 @@ async function recoverOmniPassword() {
     r = await tryOmniLogin(password).catch(() => null);
     if (r?.ok && r.cookie) return r.cookie;
   }
+  // Recovery wrote a password we cannot use yet — allow another attempt next time.
+  omniPasswordRecovered = false;
   return null;
 }
 
@@ -1178,19 +1209,39 @@ function assertSafePath(value, label) {
   return p;
 }
 
+/** cmd.exe misreads UTF-8 without a BOM when the path contains Cyrillic usernames. */
+function writeCmdFile(file, body) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `\uFEFF${body.replace(/^\uFEFF/, "")}`, "utf8");
+}
+
+/**
+ * Launch Claude Code directly. Going through `omniroute launch` used to fail with
+ * "path not found" on machines where the nested .bat path or claude.cmd lookup broke
+ * (Cyrillic usernames, missing PATH after the omniroute shim, etc.).
+ *
+ * Claude itself is checked at launch time, not here: writeSettings also runs when the
+ * user only has a key and has not installed Claude Code yet.
+ */
 function writeBat(model, token) {
   assertSafeModel(model);
   assertSafeToken(token);
-  assertSafePath(nodeDir(), "Node.js");
-  assertSafePath(npmBinDir(), "npm");
-  assertSafePath(omniCmdPath(), "OmniRoute");
+  const node = assertSafePath(nodeDir(), "Node.js");
+  const npm = assertSafePath(npmBinDir(), "npm");
+  const profile = assertSafePath(PROFILE_DIR, "Claude profile");
+
+  let claude = String(claudeCmdPath() || "").trim();
+  if (!PATH_RE.test(claude)) claude = "claude.cmd";
 
   const bat = `@echo off
 setlocal EnableExtensions
-set "PATH=${nodeDir()};${npmBinDir()};%PATH%"
+chcp 65001 >nul
+set "PATH=${node};${npm};%PATH%"
+set "ANTHROPIC_BASE_URL=${OMNI}"
 set "ANTHROPIC_AUTH_TOKEN=${token}"
+set "ANTHROPIC_MODEL=${model}"
 set "OMNIROUTE_API_KEY=${token}"
-set "OMNIROUTE=${omniCmdPath()}"
+set "CLAUDE_CONFIG_DIR=${profile}"
 
 echo Checking OmniRoute...
 curl.exe -s -o NUL "${OMNI}/api/monitoring/health"
@@ -1198,20 +1249,28 @@ if errorlevel 1 (
   echo.
   echo [ERROR] OmniRoute offline.
   echo Start FreeClaude.exe first - it brings OmniRoute up.
-  echo OmniRoute is not started separately so it cannot linger as an orphan.
   echo.
   pause
   exit /b 1
 )
 
-if not exist "%OMNIROUTE%" (
-  echo [ERROR] omniroute.cmd not found
-  pause
-  exit /b 1
+where claude.cmd >nul 2>&1
+if errorlevel 1 (
+  if not exist "${claude}" (
+    echo [ERROR] Claude Code not found.
+    echo Install it from FreeClaude Settings, or set the path with the gear icon.
+    echo.
+    pause
+    exit /b 1
+  )
 )
 
-echo Launching Claude Code with ${model}...
-call "%OMNIROUTE%" launch --profile active-freeclaude --token "%ANTHROPIC_AUTH_TOKEN%" %*
+echo Starting Claude Code with ${model}...
+if exist "${claude}" (
+  call "${claude}" %*
+) else (
+  call claude.cmd %*
+)
 set "EC=%ERRORLEVEL%"
 if not "%EC%"=="0" (
   echo.
@@ -1220,8 +1279,7 @@ if not "%EC%"=="0" (
 )
 exit /b %EC%
 `;
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(FREECLAUDE, bat);
+  writeCmdFile(FREECLAUDE, bat);
 }
 
 function writeSettings(model, token) {
@@ -2394,7 +2452,15 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && u.pathname === "/api/models") {
-      if (!(await isOmniUp())) return send(res, 503, { error: "OmniRoute offline" });
+      if (!(await isOmniUp())) {
+        const up = await ensureOmni(60000);
+        if (!up) {
+          return send(res, 503, {
+            error: st("srv.omniDown"),
+            reason: describeUpstreamError(null, "ECONNREFUSED OmniRoute", currentLang()),
+          });
+        }
+      }
       const r = await omniFetch("/v1/models");
       if (!r.ok) {
         const raw = r.text || "OmniRoute unavailable";
@@ -2428,6 +2494,18 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && u.pathname === "/api/test") {
       const { model } = await readBody(req);
       if (!model) return send(res, 400, { ok: false, error: "model required" });
+      if (!(await isOmniUp())) {
+        const up = await ensureOmni(60000);
+        if (!up) {
+          return send(res, 200, {
+            ok: false,
+            status: null,
+            error: st("srv.omniDown"),
+            reason: describeUpstreamError(null, "ECONNREFUSED OmniRoute", currentLang()),
+            ms: 0,
+          });
+        }
+      }
       const started = Date.now();
       try {
         const r = await omniFetch("/v1/messages", {
@@ -2485,19 +2563,34 @@ const server = http.createServer(async (req, res) => {
       writeSettings(model, token);
       assertSafePath(nodeDir(), "Node.js");
       assertSafePath(npmBinDir(), "npm");
+      if (!isClaudeCodeReady() && !whichExists(claudeCmdPath())) {
+        return send(res, 400, {
+          ok: false,
+          error: st("srv.claudeNotFound", { path: claudeCmdPath() || "claude.cmd" }),
+        });
+      }
 
+      // %APPDATA% keeps the call working even when the absolute path has Cyrillic letters
+      // that cmd.exe would otherwise misread from a UTF-8 .cmd without a BOM.
       const launcher = path.join(DATA_DIR, "launch-claude.cmd");
-      fs.writeFileSync(
+      writeCmdFile(
         launcher,
         `@echo off
 setlocal EnableExtensions
+chcp 65001 >nul
 set "PATH=${nodeDir()};${npmBinDir()};%PATH%"
 title Claude Code - ${model}
 echo.
 echo  Model: ${model}
 echo  Starting Claude Code...
 echo.
-call "${FREECLAUDE}"
+if not exist "%APPDATA%\\FreeClaude\\freeclaude.bat" (
+  echo [ERROR] freeclaude.bat not found in %%APPDATA%%\\FreeClaude
+  echo Open FreeClaude, connect a model, then try again.
+  pause
+  exit /b 1
+)
+call "%APPDATA%\\FreeClaude\\freeclaude.bat"
 if errorlevel 1 pause
 `
       );
