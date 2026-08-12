@@ -54,8 +54,6 @@ const axiom = createAxiom({
 });
 const FREECLAUDE = path.join(DATA_DIR, "freeclaude.bat");
 const PUBLIC = path.join(__dirname, "public");
-const NODE_DIR_DEFAULT = "C:\\Program Files\\nodejs";
-const NPM_BIN = path.join(process.env.APPDATA || "", "npm");
 const LOCALAPPDATA = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
 const NODE_PORTABLE_DIR = path.join(LOCALAPPDATA, "Programs", "node");
 const MIN_NODE_MAJOR = 22;
@@ -76,6 +74,8 @@ const PATH_RE = /^(?:[A-Za-z]:\\|\\\\)[^"|&<>^%\r\n]{0,400}$/;
 const POSIX_PATH_RE = /^\/[^"'&|;<>`$\r\n]{0,400}$/;
 
 const {
+  NODE_DIR_DEFAULT,
+  NPM_BIN,
   configuredPaths,
   enrichedPath,
   existingFile,
@@ -94,8 +94,16 @@ const {
  * not installed with no way to correct it — hence the manual override per component.
  */
 function npmBinDir() {
-  const override = manualPath("omniroute", "omniroute.cmd") || manualPath("claude", "claude.cmd");
-  return override ? path.dirname(override) : NPM_BIN;
+  const isWin = process.platform === "win32";
+  const exe = isWin ? "npm.cmd" : "npm";
+  const omniExe = isWin ? "omniroute.cmd" : "omniroute";
+  const claudeExe = isWin ? "claude.cmd" : "claude";
+
+  const override = manualPath("omniroute", omniExe) || manualPath("claude", claudeExe) || manualPath("npm", exe);
+  if (override) return path.dirname(override);
+  const resolved = resolveNpm();
+  if (resolved) return path.dirname(resolved);
+  return NPM_BIN;
 }
 
 function omniCmdPath() {
@@ -121,11 +129,12 @@ function claudeCmdPath() {
   return manualPath("claude", "claude.cmd") || path.join(npmBinDir(), "claude.cmd");
 }
 
+const IS_WIN = process.platform === "win32";
 const PATH_KEYS = {
-  node: { exe: "node.exe", label: "Node.js" },
-  npm: { exe: "npm.cmd", label: "npm" },
-  omniroute: { exe: "omniroute.cmd", label: "OmniRoute" },
-  claude: { exe: "claude.cmd", label: "Claude Code" },
+  node: { exe: IS_WIN ? "node.exe" : "node", label: "Node.js" },
+  npm: { exe: IS_WIN ? "npm.cmd" : "npm", label: "npm" },
+  omniroute: { exe: IS_WIN ? "omniroute.cmd" : "omniroute", label: "OmniRoute" },
+  claude: { exe: IS_WIN ? "claude.cmd" : "claude", label: "Claude Code" },
 };
 
 // Packaged EXE: do not auto-spawn a browser from inside pkg (causes 0xC0000005).
@@ -705,13 +714,19 @@ function openUrlApp(url) {
     }
   }
   try {
-    const child = spawn(
-      process.env.ComSpec || "cmd.exe",
-      ["/c", "start", "", url],
-      { detached: true, stdio: "ignore", windowsHide: true }
-    );
-    child.on("error", () => {});
-    child.unref();
+    if (process.platform === "darwin") {
+      const child = spawn("open", [url], { detached: true, stdio: "ignore" });
+      child.on("error", () => {});
+      child.unref();
+    } else {
+      const child = spawn(
+        process.env.ComSpec || "cmd.exe",
+        ["/c", "start", "", url],
+        { detached: true, stdio: "ignore", windowsHide: true }
+      );
+      child.on("error", () => {});
+      child.unref();
+    }
   } catch (err) {
     console.error("openUrlApp failed:", err && err.message ? err.message : err);
   }
@@ -1183,13 +1198,19 @@ function startOmniRoute() {
         stdio: "ignore",
         windowsHide: true,
         env,
-        cwd: path.join(npmBinDir(), "node_modules", "omniroute"),
+        cwd: path.dirname(path.dirname(mjs)),
       });
-    } else {
+    } else if (process.platform === "win32") {
       child = spawn(process.env.ComSpec || "cmd.exe", ["/d", "/c", omniCmd, "serve", "--no-open"], {
         detached: false,
         stdio: "ignore",
         windowsHide: true,
+        env,
+      });
+    } else {
+      child = spawn(omniCmd, ["serve", "--no-open"], {
+        detached: false,
+        stdio: "ignore",
         env,
       });
     }
@@ -2675,10 +2696,46 @@ const server = http.createServer(async (req, res) => {
 
       // %APPDATA% keeps the call working even when the absolute path has Cyrillic letters
       // that cmd.exe would otherwise misread from a UTF-8 .cmd without a BOM.
-      const launcher = path.join(DATA_DIR, "launch-claude.cmd");
-      writeCmdFile(
-        launcher,
-        `@echo off
+      if (process.platform !== "win32") {
+        const launcher = path.join(DATA_DIR, "launch-claude.sh");
+        writeCmdFile(
+          launcher,
+          `#!/usr/bin/env bash
+export PATH="${nodeDir()}:${npmBinDir()}:$PATH"
+echo ""
+echo "Model: ${model}"
+echo "Starting Claude Code..."
+echo ""
+if [ ! -f "${FREECLAUDE}" ]; then
+  echo "[ERROR] freeclaude.sh not found in ${DATA_DIR}"
+  echo "Open FreeClaude, connect a model, then try again."
+  exit 1
+fi
+exec "${FREECLAUDE}" "$@"
+`
+        );
+        try { fs.chmodSync(launcher, 0o755); } catch { /* ignore */ }
+
+        if (process.platform === "darwin") {
+          spawn("open", ["-a", "Terminal", launcher], {
+            detached: true,
+            stdio: "ignore",
+            cwd: DATA_DIR,
+            env: { ...process.env, PATH: `${nodeDir()}:${npmBinDir()}:${enrichedPath()}` },
+          }).unref();
+        } else {
+          spawn("x-terminal-emulator", ["-e", launcher], {
+            detached: true,
+            stdio: "ignore",
+            cwd: DATA_DIR,
+            env: { ...process.env, PATH: `${nodeDir()}:${npmBinDir()}:${enrichedPath()}` },
+          }).unref();
+        }
+      } else {
+        const launcher = path.join(DATA_DIR, "launch-claude.cmd");
+        writeCmdFile(
+          launcher,
+          `@echo off
 setlocal EnableExtensions
 chcp 65001 >nul
 set "PATH=${nodeDir()};${npmBinDir()};%PATH%"
@@ -2696,15 +2753,16 @@ if not exist "%APPDATA%\\FreeClaude\\freeclaude.bat" (
 call "%APPDATA%\\FreeClaude\\freeclaude.bat"
 if errorlevel 1 pause
 `
-      );
+        );
 
-      spawn("cmd.exe", ["/c", "start", "Claude Code", "cmd.exe", "/k", launcher], {
-        detached: true,
-        stdio: "ignore",
-        windowsHide: false,
-        cwd: DATA_DIR,
-        env: { ...process.env, PATH: `${nodeDir()};${npmBinDir()};${enrichedPath()}` },
-      }).unref();
+        spawn("cmd.exe", ["/c", "start", "Claude Code", "cmd.exe", "/k", launcher], {
+          detached: true,
+          stdio: "ignore",
+          windowsHide: false,
+          cwd: DATA_DIR,
+          env: { ...process.env, PATH: `${nodeDir()};${npmBinDir()};${enrichedPath()}` },
+        }).unref();
+      }
 
       return send(res, 200, { ok: true, model });
     }
