@@ -135,6 +135,7 @@ const EN = {
   "axiom.applying": "Applying…",
   "axiom.checking": "Checking…",
   "axiom.noPrompt": "no prompt text",
+  "axiom.ready": "Prompt included — turn on to install",
   "axiom.enabled": "Axiom enabled",
   "axiom.disabled": "Axiom disabled",
 
@@ -524,6 +525,7 @@ const RU = {
   "axiom.applying": "Применяю…",
   "axiom.checking": "Проверяю…",
   "axiom.noPrompt": "нет текста промпта",
+  "axiom.ready": "Промпт в комплекте — включи, чтобы установить",
   "axiom.enabled": "Axiom включён",
   "axiom.disabled": "Axiom выключен",
 

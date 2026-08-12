@@ -1,6 +1,6 @@
 {
   "name": "freeclaude-code",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "Local Windows companion UI for Claude Code + OmniRoute + Kiro",
   "private": true,
   "bin": "server.js",
@@ -25,7 +25,8 @@
   "pkg": {
     "targets": ["node22-win-x64"],
     "assets": [
-      "public/**/*"
+      "public/**/*",
+      "axiom-default.md"
     ],
     "scripts": [
       "omni-keys-proxy.js",

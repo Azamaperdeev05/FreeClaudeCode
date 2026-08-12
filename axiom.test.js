@@ -75,7 +75,7 @@ scenario("no persona anywhere reports unavailable and refuses to turn on", ({ ax
   const s = axiom.state();
   assert.strictEqual(s.available, false);
   assert.strictEqual(s.enabled, false);
-  assert.throws(() => axiom.setEnabled(true), /Axiom/);
+  assert.throws(() => axiom.setEnabled(true), /Axiom|prompt/i);
 });
 
 scenario("turning off twice is harmless", ({ axiom, claudeMd }) => {
@@ -85,5 +85,41 @@ scenario("turning off twice is harmless", ({ axiom, claudeMd }) => {
   assert.strictEqual(s.enabled, false);
   assert.strictEqual(s.available, true);
 });
+
+{
+  const name = "bundled default seeds the store so enable works on a fresh install";
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "axiom-bundle-"));
+  const claudeMd = path.join(dir, ".claude", "CLAUDE.md");
+  const backup = path.join(dir, ".claude", "CLAUDE.md.freeclaude-bak");
+  const store = path.join(dir, "data", "axiom.md");
+  const bundled = path.join(dir, "axiom-default.md");
+  fs.mkdirSync(path.dirname(claudeMd), { recursive: true });
+  fs.mkdirSync(path.dirname(store), { recursive: true });
+  fs.writeFileSync(bundled, PERSONA);
+  try {
+    const axiom = createAxiom({ claudeMd, backup, store, bundled });
+    const before = axiom.state();
+    assert.strictEqual(before.available, true);
+    assert.strictEqual(before.enabled, false);
+    assert.strictEqual(fs.readFileSync(store, "utf8"), PERSONA);
+
+    const on = axiom.setEnabled(true);
+    assert.strictEqual(on.enabled, true);
+    assert.strictEqual(fs.readFileSync(claudeMd, "utf8"), PERSONA);
+
+    fs.writeFileSync(store, PERSONA + "custom\n");
+    const again = createAxiom({ claudeMd, backup, store, bundled });
+    again.state();
+    assert.ok(fs.readFileSync(store, "utf8").includes("custom"), "bundle must not overwrite store");
+    again.setEnabled(true);
+    assert.ok(fs.readFileSync(claudeMd, "utf8").includes("custom"));
+    console.log(`ok   ${name}`);
+  } catch (e) {
+    failed++;
+    console.log(`FAIL ${name}\n     ${e.message}`);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 process.exit(failed ? 1 : 0);

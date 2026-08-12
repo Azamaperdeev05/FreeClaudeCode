@@ -1204,7 +1204,9 @@ function renderAxiom(s) {
   if (els.axiomState) els.axiomState.textContent = enabled ? t("axiom.on") : t("axiom.off");
   if (els.axiomMeta) {
     const size = formatKb(s?.bytes);
-    els.axiomMeta.textContent = `~/.claude/CLAUDE.md${size ? ` · ${size}` : ""}`;
+    els.axiomMeta.textContent = enabled
+      ? `~/.claude/CLAUDE.md${size ? ` · ${size}` : ""}`
+      : t("axiom.ready");
   }
 }
 

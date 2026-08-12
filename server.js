@@ -35,7 +35,23 @@ const CONFIG = path.join(DATA_DIR, "config.json");
 const CLAUDE_MD = path.join(path.dirname(SETTINGS), "CLAUDE.md");
 const CLAUDE_MD_BACKUP = path.join(path.dirname(SETTINGS), "CLAUDE.md.freeclaude-bak");
 const AXIOM_STORE = path.join(DATA_DIR, "axiom.md");
-const axiom = createAxiom({ claudeMd: CLAUDE_MD, backup: CLAUDE_MD_BACKUP, store: AXIOM_STORE });
+// Prefer the copy next to the exe (easy to replace), then the one baked into the pkg snapshot.
+const AXIOM_BUNDLED = [
+  path.join(EXE_DIR, "axiom-default.md"),
+  path.join(__dirname, "axiom-default.md"),
+].find((p) => {
+  try {
+    return fs.existsSync(p);
+  } catch {
+    return false;
+  }
+}) || path.join(EXE_DIR, "axiom-default.md");
+const axiom = createAxiom({
+  claudeMd: CLAUDE_MD,
+  backup: CLAUDE_MD_BACKUP,
+  store: AXIOM_STORE,
+  bundled: AXIOM_BUNDLED,
+});
 const FREECLAUDE = path.join(DATA_DIR, "freeclaude.bat");
 const PUBLIC = path.join(__dirname, "public");
 const NODE_DIR_DEFAULT = "C:\\Program Files\\nodejs";
