@@ -1,12 +1,45 @@
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const formatDuration = require("./format-duration");
-
-const DB_PATH = path.join(process.env.USERPROFILE || "", ".omniroute", "storage.sqlite");
+const omniDoctor = require("./omni-doctor");
 
 // OmniRoute writes to this same file, so reads/writes can collide.
 const BUSY_TIMEOUT_MS = 10000;
+
+/**
+ * Mirrors OmniRoute's own resolver (src/lib/dataPaths.ts): DATA_DIR wins, then the
+ * legacy ~/.omniroute directory if it still exists, then %APPDATA%/omniroute.
+ * A fresh install has no legacy directory, so hardcoding it loses the database.
+ */
+function candidateDbPaths() {
+  const home = process.env.USERPROFILE || process.env.HOME || os.homedir();
+  const dirs = [];
+
+  const configured = String(process.env.DATA_DIR || "").trim();
+  if (configured) dirs.push(path.resolve(configured));
+
+  if (home) dirs.push(path.join(home, ".omniroute"));
+
+  const appData = process.env.APPDATA || (home ? path.join(home, "AppData", "Roaming") : "");
+  if (appData) dirs.push(path.join(appData, "omniroute"));
+
+  const seen = new Set();
+  return dirs
+    .filter((dir) => {
+      const norm = dir.toLowerCase();
+      if (seen.has(norm)) return false;
+      seen.add(norm);
+      return true;
+    })
+    .map((dir) => path.join(dir, "storage.sqlite"));
+}
+
+function resolveDbPath() {
+  const candidates = candidateDbPaths();
+  return candidates.find((file) => fs.existsSync(file)) || candidates[candidates.length - 1] || "";
+}
 
 let _Database;
 
@@ -39,8 +72,13 @@ function loadDatabaseCtor() {
 
 function getDb(readonly = false) {
   const Database = loadDatabaseCtor();
-  if (!fs.existsSync(DB_PATH)) throw new Error("OmniRoute DB не найдена. Сначала установи и запусти OmniRoute.");
-  return new Database(DB_PATH, { readonly, timeout: BUSY_TIMEOUT_MS });
+  const file = resolveDbPath();
+  if (!file || !fs.existsSync(file)) {
+    throw new Error(
+      `OmniRoute DB не найдена (искали: ${candidateDbPaths().join(", ")}). Сначала установи и запусти OmniRoute.`
+    );
+  }
+  return new Database(file, { readonly, timeout: BUSY_TIMEOUT_MS });
 }
 
 function tableColumns(db, table) {
@@ -473,43 +511,48 @@ function getAccountLimitInfo() {
 function healKiroConnections() {
   const db = getDb(false);
   try {
-    const cols = new Set(tableColumns(db, "provider_connections"));
-    const now = new Date().toISOString();
-
-    const setParts = [];
-    if (cols.has("is_active")) setParts.push("is_active = 1");
-    if (cols.has("test_status")) {
-      setParts.push(
-        "test_status = CASE WHEN test_status IS NULL OR test_status = '' OR lower(test_status) IN ('disconnected','pending','unknown') THEN 'active' ELSE test_status END"
-      );
-    }
-    if (cols.has("last_error")) setParts.push("last_error = NULL");
-    if (cols.has("last_error_at")) setParts.push("last_error_at = NULL");
-    if (cols.has("updated_at")) setParts.push("updated_at = ?");
-
-    if (!setParts.length) return { ok: true, healed: 0 };
-
-    const whereParts = ["provider IN ('kiro','kr')"];
-    const tokenConds = [];
-    if (cols.has("access_token")) tokenConds.push("(access_token IS NOT NULL AND trim(access_token) != '')");
-    if (cols.has("refresh_token")) tokenConds.push("(refresh_token IS NOT NULL AND trim(refresh_token) != '')");
-    if (cols.has("api_key")) tokenConds.push("(api_key IS NOT NULL AND trim(api_key) != '')");
-    if (tokenConds.length) whereParts.push(`(${tokenConds.join(" OR ")})`);
-
-    const statusConds = [];
-    if (cols.has("is_active")) statusConds.push("(is_active = 0 OR is_active IS NULL)");
-    if (cols.has("test_status")) statusConds.push("lower(COALESCE(test_status, '')) IN ('disconnected', 'pending', 'unknown', '')");
-    if (statusConds.length) whereParts.push(`(${statusConds.join(" OR ")})`);
-    if (cols.has("test_status")) whereParts.push("lower(COALESCE(test_status, '')) NOT IN ('banned', 'expired', 'credits_exhausted')");
-
-    const values = cols.has("updated_at") ? [now] : [];
-    const result = db
-      .prepare(`UPDATE provider_connections SET ${setParts.join(", ")} WHERE ${whereParts.join(" AND ")}`)
-      .run(...values);
-    return { ok: true, healed: Number(result.changes || 0) };
+    return healKiroOn(db);
   } finally {
     db.close();
   }
+}
+
+/** Same repair against a caller-owned handle, so it can join a wider transaction. */
+function healKiroOn(db) {
+  const cols = new Set(tableColumns(db, "provider_connections"));
+  const now = new Date().toISOString();
+
+  const setParts = [];
+  if (cols.has("is_active")) setParts.push("is_active = 1");
+  if (cols.has("test_status")) {
+    setParts.push(
+      "test_status = CASE WHEN test_status IS NULL OR test_status = '' OR lower(test_status) IN ('disconnected','pending','unknown') THEN 'active' ELSE test_status END"
+    );
+  }
+  if (cols.has("last_error")) setParts.push("last_error = NULL");
+  if (cols.has("last_error_at")) setParts.push("last_error_at = NULL");
+  if (cols.has("updated_at")) setParts.push("updated_at = ?");
+
+  if (!setParts.length) return { ok: true, healed: 0 };
+
+  const whereParts = ["provider IN ('kiro','kr')"];
+  const tokenConds = [];
+  if (cols.has("access_token")) tokenConds.push("(access_token IS NOT NULL AND trim(access_token) != '')");
+  if (cols.has("refresh_token")) tokenConds.push("(refresh_token IS NOT NULL AND trim(refresh_token) != '')");
+  if (cols.has("api_key")) tokenConds.push("(api_key IS NOT NULL AND trim(api_key) != '')");
+  if (tokenConds.length) whereParts.push(`(${tokenConds.join(" OR ")})`);
+
+  const statusConds = [];
+  if (cols.has("is_active")) statusConds.push("(is_active = 0 OR is_active IS NULL)");
+  if (cols.has("test_status")) statusConds.push("lower(COALESCE(test_status, '')) IN ('disconnected', 'pending', 'unknown', '')");
+  if (statusConds.length) whereParts.push(`(${statusConds.join(" OR ")})`);
+  if (cols.has("test_status")) whereParts.push("lower(COALESCE(test_status, '')) NOT IN ('banned', 'expired', 'credits_exhausted')");
+
+  const values = cols.has("updated_at") ? [now] : [];
+  const result = db
+    .prepare(`UPDATE provider_connections SET ${setParts.join(", ")} WHERE ${whereParts.join(" AND ")}`)
+    .run(...values);
+  return { ok: true, healed: Number(result.changes || 0) };
 }
 
 /** Есть ли живое Kiro-соединение с токенами (даже если UI ещё не обновился). */
@@ -533,9 +576,23 @@ function hasKiroCredentials() {
   }
 }
 
+function doctorContext(apiKey) {
+  return { getDb, tableColumns, healOn: healKiroOn, apiKey: apiKey || null };
+}
+
+function diagnoseInstall(apiKey = null) {
+  return omniDoctor.diagnose(doctorContext(apiKey));
+}
+
+function repairInstall(apiKey = null, codes = null) {
+  return omniDoctor.repair(doctorContext(apiKey), { codes });
+}
+
 module.exports = {
   createApiKey,
   ensureApiKey,
+  diagnoseInstall,
+  repairInstall,
   listApiKeys,
   getKiroStatus,
   getKeyUsage,
@@ -544,5 +601,12 @@ module.exports = {
   healKiroConnections,
   hasKiroCredentials,
   formatDuration,
-  DB_PATH,
+  getDb,
+  tableColumns,
+  candidateDbPaths,
+  dbPath: resolveDbPath,
+  // OmniRoute may create the database after we start, so resolve on every read.
+  get DB_PATH() {
+    return resolveDbPath();
+  },
 };

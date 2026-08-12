@@ -64,7 +64,12 @@ New-Item -ItemType Directory -Path $out -Force | Out-Null
 # Clean sources only (no config keys, no scratch dumps)
 $sources = @(
   "server.js",
+  "axiom.js",
+  "errors.js",
+  "i18n.js",
+  "kiro-state.js",
   "omni-keys.js",
+  "omni-doctor.js",
   "omni-keys-proxy.js",
   "node-resolve.js",
   "format-duration.js",
@@ -94,7 +99,7 @@ Invoke-Checked "pkg" { & $node $pkgBin . --targets node22-win-x64 --output (Join
 
 Write-Host "`n[4/4] copy runtime files..." -ForegroundColor Yellow
 Copy-Item (Join-Path $stage "public") (Join-Path $out "public") -Recurse -Force
-foreach ($f in @("omni-keys.js", "node-resolve.js", "format-duration.js", "sqlite-bridge.js")) {
+foreach ($f in @("omni-keys.js", "omni-doctor.js", "node-resolve.js", "format-duration.js", "sqlite-bridge.js")) {
   Copy-Item (Join-Path $root $f) (Join-Path $out $f) -Force
 }
 
@@ -147,6 +152,7 @@ $required = @(
   "FreeClaude.exe",
   "sqlite-bridge.js",
   "omni-keys.js",
+  "omni-doctor.js",
   "node-resolve.js",
   "format-duration.js",
   "public\index.html",
@@ -158,6 +164,30 @@ foreach ($rel in $required) {
 }
 $exe = Get-Item (Join-Path $out "FreeClaude.exe")
 if ($exe.Length -lt 10MB) { throw "FreeClaude.exe подозрительно мал ($($exe.Length) байт)" }
+
+# A module missing from the pkg snapshot only shows up at runtime, and every file checked
+# above can be present while the exe dies on its first require. Boot it in self-test mode:
+# it resolves every module and reads the dictionary, then exits without taking the port.
+Write-Host "smoke test (exe must boot)..." -ForegroundColor Yellow
+$smokeLog = Join-Path $env:TEMP "freeclaude-smoke-$PID.log"
+$smokeErr = "$smokeLog.err"
+$prevSelfTest = $env:FREECLAUDE_SELFTEST
+$env:FREECLAUDE_SELFTEST = "1"
+try {
+  $smoke = Start-Process -FilePath $exe.FullName -PassThru -Wait -WindowStyle Hidden `
+    -RedirectStandardOutput $smokeLog -RedirectStandardError $smokeErr
+  $smokeOut = @(
+    (Get-Content $smokeLog -Raw -ErrorAction SilentlyContinue),
+    (Get-Content $smokeErr -Raw -ErrorAction SilentlyContinue)
+  ) -join "`n"
+  if ($smoke.ExitCode -ne 0 -or $smokeOut -notmatch "selftest ok") {
+    throw "FreeClaude.exe не стартует (код $($smoke.ExitCode)). Вывод:`n$smokeOut"
+  }
+  Write-Host "  exe boots, all modules resolve" -ForegroundColor Green
+} finally {
+  $env:FREECLAUDE_SELFTEST = $prevSelfTest
+  Remove-Item $smokeLog, $smokeErr -Force -ErrorAction SilentlyContinue
+}
 
 Write-Host "`nDONE: $out" -ForegroundColor Green
 Get-ChildItem $out | Format-Table Name, Length -AutoSize

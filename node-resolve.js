@@ -13,6 +13,10 @@ const { spawnSync } = require("child_process");
 
 const NODE_DIR_DEFAULT = "C:\\Program Files\\nodejs";
 const NPM_BIN = path.join(process.env.APPDATA || "", "npm");
+const APPDATA = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+// Read straight from the config file rather than taking the paths as arguments: the
+// packaged exe and the sqlite bridge are separate processes and both must see the override.
+const CONFIG_FILE = path.join(APPDATA, "FreeClaude", "config.json");
 
 let _nodePathCache;
 let _npmPathCache;
@@ -75,6 +79,29 @@ function whereOnPath(name) {
   return null;
 }
 
+function existingFile(p) {
+  try {
+    return p && fs.statSync(p).isFile() ? p : null;
+  } catch {
+    return null;
+  }
+}
+
+function configuredPaths() {
+  try {
+    return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")).paths || {};
+  } catch {
+    return {};
+  }
+}
+
+/** People paste either the exe itself or the folder holding it, so accept both. */
+function manualPath(key, exeName) {
+  const raw = String(configuredPaths()[key] || "").trim();
+  if (!raw) return null;
+  return existingFile(raw) || existingFile(path.join(raw, exeName));
+}
+
 function firstExisting(candidates) {
   for (const c of candidates) {
     try {
@@ -103,6 +130,7 @@ function resolveNode() {
 
   _nodePathCache =
     firstExisting([
+      manualPath("node", "node.exe"),
       path.join(NODE_DIR_DEFAULT, "node.exe"),
       process.env.NVM_SYMLINK ? path.join(process.env.NVM_SYMLINK, "node.exe") : null,
       path.join(process.env.LOCALAPPDATA || "", "Programs", "node", "node.exe"),
@@ -125,6 +153,7 @@ function resolveNpm() {
   // npm.cmd next to node.exe wins over %APPDATA%\npm shims, which can point at a stale install.
   _npmPathCache =
     firstExisting([
+      manualPath("npm", "npm.cmd"),
       node ? path.join(path.dirname(node), "npm.cmd") : null,
       path.join(NODE_DIR_DEFAULT, "npm.cmd"),
       process.env.NVM_SYMLINK ? path.join(process.env.NVM_SYMLINK, "npm.cmd") : null,
@@ -166,9 +195,13 @@ function nodeMajorVersion(nodeExe) {
 }
 
 module.exports = {
+  CONFIG_FILE,
   NODE_DIR_DEFAULT,
   NPM_BIN,
+  configuredPaths,
   enrichedPath,
+  existingFile,
+  manualPath,
   invalidateToolCache,
   nodeDir,
   nodeMajorVersion,

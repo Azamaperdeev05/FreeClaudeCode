@@ -12,7 +12,8 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white" alt="Windows" />
   <img src="https://img.shields.io/badge/Node.js-22%2B-339933?logo=nodedotjs&logoColor=white" alt="Node" />
-  <img src="https://img.shields.io/badge/Release-v1.0.4-7c6cff" alt="Release" />
+  <img src="https://img.shields.io/badge/Release-v1.3.0-7c6cff" alt="Release" />
+  <img src="https://img.shields.io/badge/UI-EN%20%2F%20RU-7c6cff" alt="Languages" />
   <img src="https://img.shields.io/badge/License-MIT-green" alt="MIT" />
 </p>
 
@@ -48,9 +49,12 @@
 3. Open `http://127.0.0.1:3847`
 4. Settings → Kiro → Models → Launch
 
-> Latest: **v1.0.4** — hardened local server, Node on any drive, cleaner shutdown.
+> Latest: **v1.3.0** — FreeClaude now finds OmniRoute's database wherever it actually
+> lives, and repairs a pre-existing OmniRoute whose settings quietly hide models or
+> reject the key. Settings → **Check and repair** shows what it found.
 
-> Requires **Node.js 22+** for OmniRoute key management.
+> Needs **Node.js 22+** for OmniRoute key management — the installer sets it up for you,
+> or point FreeClaude at an existing copy with the gear icon on the Node.js card.
 
 > Copy the **whole folder** to another PC.
 

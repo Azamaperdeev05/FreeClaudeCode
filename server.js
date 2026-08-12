@@ -2,10 +2,15 @@ const http = require("http");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
+const crypto = require("crypto");
 const { spawn, spawnSync, execFile, execFileSync } = require("child_process");
 const { URL } = require("url");
 const { promisify } = require("util");
 const omniKeys = process.pkg ? require("./omni-keys-proxy") : require("./omni-keys");
+const { createAxiom } = require("./axiom");
+const { describeUpstreamError } = require("./errors");
+const { kiroStateFromProviders } = require("./kiro-state");
+const i18n = require("./i18n");
 
 const execFileAsync = promisify(execFile);
 
@@ -25,11 +30,19 @@ const DATA_DIR = (() => {
   return dir;
 })();
 const CONFIG = path.join(DATA_DIR, "config.json");
+// Claude Code loads ~/.claude/CLAUDE.md into every session, so the toggle is just this
+// file being present or not. The text itself lives in DATA_DIR and survives switching off.
+const CLAUDE_MD = path.join(path.dirname(SETTINGS), "CLAUDE.md");
+const CLAUDE_MD_BACKUP = path.join(path.dirname(SETTINGS), "CLAUDE.md.freeclaude-bak");
+const AXIOM_STORE = path.join(DATA_DIR, "axiom.md");
+const axiom = createAxiom({ claudeMd: CLAUDE_MD, backup: CLAUDE_MD_BACKUP, store: AXIOM_STORE });
 const FREECLAUDE = path.join(DATA_DIR, "freeclaude.bat");
 const PUBLIC = path.join(__dirname, "public");
 const NODE_DIR_DEFAULT = "C:\\Program Files\\nodejs";
 const NPM_BIN = path.join(process.env.APPDATA || "", "npm");
-const WINGET = path.join(process.env.LOCALAPPDATA || "", "Microsoft\\WindowsApps\\winget.exe");
+const LOCALAPPDATA = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+const NODE_PORTABLE_DIR = path.join(LOCALAPPDATA, "Programs", "node");
+const MIN_NODE_MAJOR = 22;
 const ACCESS_URL = "https://pastebin.com/raw/rJp7g0eB";
 const TELEGRAM_URL = "https://t.me/loveaideep";
 const AWS_SIGNOUT_URL = "https://view.awsapps.com/start/#/signout";
@@ -41,15 +54,46 @@ const AWS_PORTAL_URL = "https://view.awsapps.com/start";
  */
 const MODEL_RE = /^[A-Za-z0-9._/:-]{1,120}$/;
 const TOKEN_RE = /^[A-Za-z0-9._-]{1,200}$/;
+// Local drive path or UNC share, without the characters cmd.exe treats as syntax.
+const PATH_RE = /^(?:[A-Za-z]:\\|\\\\)[^"|&<>^%\r\n]{0,400}$/;
 
 const {
+  configuredPaths,
   enrichedPath,
+  existingFile,
   invalidateToolCache,
+  manualPath,
   nodeDir,
+  nodeMajorVersion,
   resolveNode,
   resolveNpm,
   whereOnPath,
 } = require("./node-resolve");
+
+/**
+ * OmniRoute and Claude Code are npm globals, so they normally sit in %APPDATA%\npm.
+ * A custom npm prefix puts them elsewhere, which used to leave the UI insisting they were
+ * not installed with no way to correct it — hence the manual override per component.
+ */
+function npmBinDir() {
+  const override = manualPath("omniroute", "omniroute.cmd") || manualPath("claude", "claude.cmd");
+  return override ? path.dirname(override) : NPM_BIN;
+}
+
+function omniCmdPath() {
+  return manualPath("omniroute", "omniroute.cmd") || path.join(npmBinDir(), "omniroute.cmd");
+}
+
+function claudeCmdPath() {
+  return manualPath("claude", "claude.cmd") || path.join(npmBinDir(), "claude.cmd");
+}
+
+const PATH_KEYS = {
+  node: { exe: "node.exe", label: "Node.js" },
+  npm: { exe: "npm.cmd", label: "npm" },
+  omniroute: { exe: "omniroute.cmd", label: "OmniRoute" },
+  claude: { exe: "claude.cmd", label: "Claude Code" },
+};
 
 // Packaged EXE: do not auto-spawn a browser from inside pkg (causes 0xC0000005).
 // Use FreeClaude.cmd launcher, or open http://127.0.0.1:3847 manually.
@@ -85,18 +129,7 @@ const kiroOAuth = {
   verificationUriComplete: null,
 };
 
-function getOmniPassword() {
-  const cfg = readConfig();
-  return (
-    process.env.INITIAL_PASSWORD ||
-    process.env.OMNIROUTE_PASSWORD ||
-    cfg.omniPassword ||
-    "CHANGEME"
-  );
-}
-
-function readOmniEnvFile() {
-  const envPath = path.join(os.homedir(), ".omniroute", ".env");
+function parseEnvFile(envPath) {
   const out = {};
   try {
     const raw = fs.readFileSync(envPath, "utf8");
@@ -114,6 +147,24 @@ function readOmniEnvFile() {
     /* no .env */
   }
   return out;
+}
+
+/** Directory of the installed omniroute npm package, or null. */
+function omniPackageDir() {
+  const dir = path.join(npmBinDir(), "node_modules", "omniroute");
+  return fs.existsSync(dir) ? dir : null;
+}
+
+/**
+ * The password can live in the user's data dir or in the package's own `.env` — the
+ * latter is where `INITIAL_PASSWORD` actually ships, so skipping it lost the real value.
+ */
+function readOmniEnvFile() {
+  const pkg = omniPackageDir();
+  return {
+    ...(pkg ? parseEnvFile(path.join(pkg, ".env")) : {}),
+    ...parseEnvFile(path.join(os.homedir(), ".omniroute", ".env")),
+  };
 }
 
 function candidateOmniPasswords() {
@@ -173,8 +224,99 @@ async function tryOmniLogin(password) {
   return { ok: res.ok && Boolean(cookie), status: res.status, cookie, text, json };
 }
 
+/** A wrong password answers 401/403 with "invalid password"; a dead server does not. */
+function looksLikeBadOmniPassword(status, message) {
+  if (status === 401 || status === 403) return true;
+  return /invalid password|incorrect password|unauthorized|wrong password/i.test(String(message || ""));
+}
+
+function omniResetPasswordScript() {
+  const pkg = omniPackageDir();
+  if (!pkg) return null;
+  const mjs = path.join(pkg, "bin", "reset-password.mjs");
+  return fs.existsSync(mjs) ? mjs : null;
+}
+
+/** The reset CLI demands 8+ chars; hex keeps it safe for stdin and .bat interpolation. */
+function generateOmniPassword() {
+  return `fc-${crypto.randomBytes(9).toString("hex")}`;
+}
+
+/**
+ * Runs OmniRoute's own `reset-password` CLI. Using the official tool means the bcrypt
+ * format and the `requireLogin`/`setupComplete` flags stay whatever OmniRoute expects,
+ * instead of us hand-writing a hash into its database.
+ */
+function runOmniPasswordReset(password) {
+  const script = omniResetPasswordScript();
+  const node = resolveNode();
+  const env = { ...process.env, PATH: `${nodeDir()};${npmBinDir()};${enrichedPath()}` };
+  const opts = {
+    input: password,
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 90000,
+    env,
+  };
+
+  let r;
+  if (script && node) {
+    r = spawnSync(node, [script, "--password-stdin"], opts);
+  } else {
+    const shim = path.join(npmBinDir(), "omniroute-reset-password.cmd");
+    if (!fs.existsSync(shim)) throw new Error(st("srv.resetCliMissing"));
+    assertSafePath(shim, "omniroute-reset-password");
+    r = spawnSync(`"${shim}" --password-stdin`, { ...opts, shell: true });
+  }
+
+  if (r.error) throw new Error(st("srv.resetCliFailed", { error: r.error.message }));
+  const out = `${r.stdout || ""}${r.stderr || ""}`.trim();
+  if (r.status !== 0) throw new Error(out.slice(0, 300) || `reset-password exit ${r.status}`);
+  return out;
+}
+
+async function restartOmniRoute() {
+  killOmniRouteListeners();
+  await sleep(1500);
+  return ensureOmni(60000);
+}
+
+// One attempt per run: if the reset itself cannot fix the login, retrying on every click
+// would just restart OmniRoute in a loop.
+let omniPasswordRecovered = false;
+
+/**
+ * Last resort when no known password works: set a fresh one through OmniRoute's CLI and
+ * remember it, so a first-time user never has to learn what CHANGEME is.
+ */
+async function recoverOmniPassword() {
+  if (omniPasswordRecovered) return null;
+  omniPasswordRecovered = true;
+
+  const password = generateOmniPassword();
+  runOmniPasswordReset(password);
+  try {
+    writeConfig({ omniPassword: password });
+  } catch {
+    /* the login below still works, it just will not survive a restart */
+  }
+  console.log(st("con.passwordReset"));
+
+  let r = await tryOmniLogin(password).catch(() => null);
+  if (r?.ok && r.cookie) return r.cookie;
+
+  // A running OmniRoute keeps the old hash in memory, so the reset only counts after a restart.
+  pushLog(st("log.omniRestartAfterReset"));
+  if (await restartOmniRoute()) {
+    r = await tryOmniLogin(password).catch(() => null);
+    if (r?.ok && r.cookie) return r.cookie;
+  }
+  return null;
+}
+
 async function loginOmniDashboard() {
   let lastMsg = "";
+  let lastStatus = 0;
   for (const password of candidateOmniPasswords()) {
     try {
       const r = await tryOmniLogin(password);
@@ -186,6 +328,7 @@ async function loginOmniDashboard() {
         }
         return r.cookie;
       }
+      lastStatus = r.status;
       lastMsg =
         (r.json && (r.json.error || r.json.message)) ||
         r.text ||
@@ -194,18 +337,123 @@ async function loginOmniDashboard() {
       lastMsg = String(err.message || err);
     }
   }
-  const pretty =
-    /invalid password/i.test(String(lastMsg))
-      ? "Неверный пароль панели OmniRoute. Открой http://127.0.0.1:20128 и проверь пароль (часто CHANGEME), либо задай OMNIROUTE_PASSWORD."
-      : String(lastMsg || "OmniRoute login failed");
-  throw new Error(pretty);
+
+  if (looksLikeBadOmniPassword(lastStatus, lastMsg)) {
+    try {
+      const cookie = await recoverOmniPassword();
+      if (cookie) return cookie;
+    } catch (err) {
+      lastMsg = st("srv.autoResetFailed", { detail: lastMsg, error: String(err.message || err) });
+    }
+    throw new Error(
+      st("srv.passwordDead", { url: OMNI, detail: String(lastMsg).slice(0, 200) })
+    );
+  }
+  throw new Error(String(lastMsg || "OmniRoute login failed"));
+}
+
+// Dashboard cookies stay valid for a while; re-logging in on every poll would hammer
+// the password path (and its recovery) for no reason.
+const omniSession = { cookie: null, at: 0 };
+const OMNI_SESSION_TTL = 10 * 60 * 1000;
+
+async function omniDashboardCookie() {
+  if (omniSession.cookie && Date.now() - omniSession.at < OMNI_SESSION_TTL) return omniSession.cookie;
+  const cookie = await loginOmniDashboard();
+  omniSession.cookie = cookie;
+  omniSession.at = Date.now();
+  return cookie;
+}
+
+function dropOmniSession() {
+  omniSession.cookie = null;
+  omniSession.at = 0;
+}
+
+/**
+ * Second opinion on the Kiro account that does not touch SQLite.
+ *
+ * Everything about "is Kiro connected" used to come from reading OmniRoute's database
+ * directly, which runs through a child Node process. On machines where that bridge fails
+ * (no Node on PATH, unusable better-sqlite3 binary, locked file) the UI declared the user
+ * logged out right after a successful AWS login. OmniRoute's own API knows the answer.
+ */
+async function fetchKiroStateOverHttp() {
+  const cookie = await omniDashboardCookie();
+  let res = await fetch(`${OMNI}/api/providers`, {
+    headers: { Cookie: cookie, Accept: "application/json" },
+    signal: AbortSignal.timeout(15000),
+  });
+  if (res.status === 401 || res.status === 403) {
+    dropOmniSession();
+    res = await fetch(`${OMNI}/api/providers`, {
+      headers: { Cookie: await omniDashboardCookie(), Accept: "application/json" },
+      signal: AbortSignal.timeout(15000),
+    });
+  }
+  if (!res.ok) throw new Error(`providers ${res.status}`);
+  return kiroStateFromProviders(await res.json());
+}
+
+const kiroHttpCache = { at: 0, value: null };
+
+/** Cached so a disconnected account does not refetch the provider list on every poll. */
+async function kiroStateOverHttp(maxAgeMs = 15000) {
+  if (kiroHttpCache.value && Date.now() - kiroHttpCache.at < maxAgeMs) return kiroHttpCache.value;
+  try {
+    const value = await fetchKiroStateOverHttp();
+    kiroHttpCache.at = Date.now();
+    kiroHttpCache.value = value;
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+function invalidateKiroHttpCache() {
+  kiroHttpCache.at = 0;
+  kiroHttpCache.value = null;
+}
+
+/**
+ * Kiro is connected if either source says so. The database is authoritative when it
+ * answers; HTTP covers the case where it cannot.
+ */
+async function resolveKiroConnected({ maxAgeMs = 15000 } = {}) {
+  let dbConnected = null;
+  let dbError = null;
+  try {
+    try {
+      omniKeys.healKiroConnections();
+    } catch {
+      /* healing is best-effort */
+    }
+    const lim = omniKeys.getAccountLimitInfo();
+    dbConnected = Boolean(lim && lim.connected);
+    if (!dbConnected) dbConnected = Boolean(omniKeys.hasKiroCredentials());
+  } catch (err) {
+    dbError = String(err.message || err);
+  }
+
+  if (dbConnected) return { connected: true, source: "db", dbError: null };
+
+  const http = await kiroStateOverHttp(maxAgeMs);
+  if (http?.connected) return { connected: true, source: "http", dbError };
+  return {
+    connected: false,
+    source: dbError ? (http ? "http" : "none") : "db",
+    dbError,
+  };
 }
 
 async function startKiroBuilderIdFlow() {
   if (!(await ensureOmni(60000))) {
-    throw new Error("OmniRoute не запущен");
+    throw new Error(st("srv.omniDown"));
   }
+  // A fresh cookie for the whole device flow; share it so the status fallback reuses it.
   const cookie = await loginOmniDashboard();
+  omniSession.cookie = cookie;
+  omniSession.at = Date.now();
   const dcRes = await fetch(`${OMNI}/api/oauth/kiro/device-code`, {
     headers: { Cookie: cookie, Accept: "application/json" },
     signal: AbortSignal.timeout(30000),
@@ -245,10 +493,10 @@ async function startKiroBuilderIdFlow() {
 
 async function pollKiroBuilderIdOnce() {
   if (!kiroOAuth.cookie || !kiroOAuth.deviceCode || !kiroOAuth.extraData) {
-    return { success: false, pending: false, error: "no_session", errorDescription: "Сначала нажми «Войти в Kiro»" };
+    return { success: false, pending: false, error: "no_session", errorDescription: st("srv.noKiroSession") };
   }
   if (Date.now() > kiroOAuth.expiresAt) {
-    return { success: false, pending: false, error: "expired", errorDescription: "Код истёк — начни вход заново" };
+    return { success: false, pending: false, error: "expired", errorDescription: st("srv.codeExpired") };
   }
 
   const body = {
@@ -327,6 +575,10 @@ async function finalizeKiroAuth() {
     keyIssued = { error: String(err.message || err) };
   }
 
+  // Before waiting on the catalog: a hidden model or a restricted key would keep
+  // /v1/models empty for the whole timeout and look like a failed login.
+  const repaired = (await autoRepairInstall())?.fixed || [];
+
   while (Date.now() - started < timeoutMs) {
     try {
       const h = omniKeys.healKiroConnections();
@@ -335,34 +587,20 @@ async function finalizeKiroAuth() {
       /* ignore */
     }
 
-    try {
-      const lim = omniKeys.getAccountLimitInfo();
-      connected = Boolean(lim?.connected) || Boolean(omniKeys.hasKiroCredentials?.());
-    } catch {
-      try {
-        connected = Boolean(omniKeys.hasKiroCredentials());
-      } catch {
-        connected = false;
-      }
-    }
+    // OmniRoute is writing the connection right now, so the cached HTTP answer is stale
+    // by definition — ask it fresh on every lap.
+    invalidateKiroHttpCache();
+    const state = await resolveKiroConnected({ maxAgeMs: 0 });
+    connected = state.connected;
 
     modelsCount = await countKiroModels();
     if (connected && modelsCount > 0) break;
-    // Есть креды, но каталог ещё пустой — подождём
-    if (connected && Date.now() - started > 8000 && modelsCount === 0) {
-      // продолжаем до таймаута
-    }
     await sleep(900);
   }
 
-  // финальный heal + status
-  try {
-    omniKeys.healKiroConnections();
-    const lim = omniKeys.getAccountLimitInfo();
-    connected = Boolean(lim?.connected) || Boolean(omniKeys.hasKiroCredentials());
-  } catch {
-    /* ignore */
-  }
+  invalidateKiroHttpCache();
+  const finalState = await resolveKiroConnected({ maxAgeMs: 0 });
+  connected = finalState.connected;
   modelsCount = await countKiroModels();
 
   return {
@@ -371,6 +609,7 @@ async function finalizeKiroAuth() {
     kiroConnected: Boolean(connected),
     modelsCount,
     healed,
+    repaired,
     waitedMs: Date.now() - started,
   };
 }
@@ -530,7 +769,7 @@ function accessDeniedPayload() {
     ok: false,
     allowed: false,
     updateRequired: true,
-    error: "Вышло обновление. Скачайте в Telegram.",
+    error: st("srv.updateRequired"),
     telegram: TELEGRAM_URL,
   };
 }
@@ -539,13 +778,21 @@ function whichExists(file) {
   return Boolean(file && fs.existsSync(file));
 }
 
+function omniModuleEntry() {
+  return path.join(npmBinDir(), "node_modules", "omniroute", "bin", "omniroute.mjs");
+}
+
+function isOmniRouteInstalled() {
+  return whichExists(omniCmdPath()) || whichExists(omniModuleEntry());
+}
+
 function claudeNativeBin() {
-  return path.join(NPM_BIN, "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe");
+  return path.join(npmBinDir(), "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe");
 }
 
 /** Real Claude Code binary — not the 500-byte postinstall stub. */
 function isClaudeCodeReady() {
-  const cmd = path.join(NPM_BIN, "claude.cmd");
+  const cmd = claudeCmdPath();
   const bin = claudeNativeBin();
   if (!whichExists(cmd) || !whichExists(bin)) return false;
   try {
@@ -574,6 +821,16 @@ function writeConfig(patch) {
   const next = { ...readConfig(), ...patch };
   fs.writeFileSync(CONFIG, JSON.stringify(next, null, 2));
   return next;
+}
+
+/** English until the user picks otherwise in Settings. */
+function currentLang() {
+  return i18n.normalizeLang(readConfig().lang);
+}
+
+/** Server-side translate: every user-facing string the API or the install log emits. */
+function st(key, vars) {
+  return i18n.t(currentLang(), key, vars);
 }
 
 function readToken() {
@@ -801,13 +1058,13 @@ function installOmniShutdownHooks() {
 }
 
 function startOmniRoute() {
-  const mjs = path.join(NPM_BIN, "node_modules", "omniroute", "bin", "omniroute.mjs");
-  const omniCmd = path.join(NPM_BIN, "omniroute.cmd");
+  const mjs = omniModuleEntry();
+  const omniCmd = omniCmdPath();
   if (!whichExists(mjs) && !whichExists(omniCmd)) return;
 
   const env = {
     ...process.env,
-    PATH: `${nodeDir()};${NPM_BIN};${enrichedPath()}`,
+    PATH: `${nodeDir()};${npmBinDir()};${enrichedPath()}`,
   };
 
   // OmniRoute — дочерний процесс FreeClaude (не detached-сирота).
@@ -821,8 +1078,8 @@ function startOmniRoute() {
 
     console.log("");
     console.log("────────────────────────────────────────");
-    console.log("  OmniRoute  ·  вместе с FreeClaude");
-    console.log("  Закроете FreeClaude — OmniRoute тоже");
+    console.log(`  ${st("con.banner1")}`);
+    console.log(`  ${st("con.banner2")}`);
     console.log(`  ${OMNI}`);
     console.log("────────────────────────────────────────");
     console.log("");
@@ -835,7 +1092,7 @@ function startOmniRoute() {
         stdio: "ignore",
         windowsHide: true,
         env,
-        cwd: path.join(NPM_BIN, "node_modules", "omniroute"),
+        cwd: path.join(npmBinDir(), "node_modules", "omniroute"),
       });
     } else {
       child = spawn(process.env.ComSpec || "cmd.exe", ["/d", "/c", omniCmd, "serve", "--no-open"], {
@@ -863,36 +1120,34 @@ async function ensureOmni(timeoutMs = 90000, opts = {}) {
     if (await isOmniUp()) {
       // Даже чужой/старый OmniRoute считаем «нашим» для cleanup при выходе
       omniOwned = true;
-      if (opts.liveLog) pushLog("OmniRoute уже online");
+      if (opts.liveLog) pushLog(st("log.omniAlreadyOnline"));
       return true;
     }
-    if (!whichExists(path.join(NPM_BIN, "omniroute.cmd")) && !whichExists(path.join(NPM_BIN, "node_modules", "omniroute", "bin", "omniroute.mjs"))) {
-      return false;
-    }
-    if (opts.liveLog) pushLog("Поднимаю OmniRoute…");
+    if (!isOmniRouteInstalled()) return false;
+    if (opts.liveLog) pushLog(st("log.omniStarting"));
     startOmniRoute();
     omniOwned = true;
     const start = Date.now();
     let lastBeat = 0;
     while (Date.now() - start < timeoutMs) {
       if (opts.checkCancel && installState.cancelRequested) {
-        if (opts.liveLog) pushLog("Ожидание OmniRoute прервано");
+        if (opts.liveLog) pushLog(st("log.omniWaitCancelled"));
         return false;
       }
       await sleep(500);
       if (await isOmniUp()) {
-        if (opts.liveLog) pushLog(`OmniRoute online за ${Math.round((Date.now() - start) / 1000)}с`);
+        if (opts.liveLog) pushLog(st("log.omniOnlineIn", { sec: Math.round((Date.now() - start) / 1000) }));
         return true;
       }
       if (opts.liveLog) {
         const sec = Math.round((Date.now() - start) / 1000);
         if (sec >= 3 && sec - lastBeat >= 5) {
           lastBeat = sec;
-          pushLog(`Жду OmniRoute… ${sec}с`);
+          pushLog(st("log.omniWaiting", { sec }));
         }
       }
     }
-    if (opts.liveLog) pushLog("OmniRoute не поднялся за отведённое время — смотри Настройки / перезапуск");
+    if (opts.liveLog) pushLog(st("log.omniTimeout"));
     return false;
   } catch (err) {
     console.error("ensureOmni failed:", err && err.message ? err.message : err);
@@ -903,34 +1158,47 @@ async function ensureOmni(timeoutMs = 90000, opts = {}) {
 
 function assertSafeModel(model) {
   const value = String(model || "").trim();
-  if (!MODEL_RE.test(value)) throw new Error("Недопустимое имя модели");
+  if (!MODEL_RE.test(value)) throw new Error(st("srv.badModel"));
   return value;
 }
 
 function assertSafeToken(token) {
   const value = String(token || "").trim();
-  if (!TOKEN_RE.test(value)) throw new Error("Недопустимый формат API-ключа");
+  if (!TOKEN_RE.test(value)) throw new Error(st("srv.badToken"));
   return value;
+}
+
+/**
+ * Manual component paths are interpolated into the generated .bat, so the same rule as for
+ * the model and the token applies: anything that could start a second command is rejected.
+ */
+function assertSafePath(value, label) {
+  const p = String(value || "").trim();
+  if (!PATH_RE.test(p)) throw new Error(st("srv.badPath", { label: label ? ` (${label})` : "", path: p }));
+  return p;
 }
 
 function writeBat(model, token) {
   assertSafeModel(model);
   assertSafeToken(token);
+  assertSafePath(nodeDir(), "Node.js");
+  assertSafePath(npmBinDir(), "npm");
+  assertSafePath(omniCmdPath(), "OmniRoute");
 
   const bat = `@echo off
 setlocal EnableExtensions
-set "PATH=${nodeDir()};%APPDATA%\\npm;%PATH%"
+set "PATH=${nodeDir()};${npmBinDir()};%PATH%"
 set "ANTHROPIC_AUTH_TOKEN=${token}"
 set "OMNIROUTE_API_KEY=${token}"
-set "OMNIROUTE=%APPDATA%\\npm\\omniroute.cmd"
+set "OMNIROUTE=${omniCmdPath()}"
 
 echo Checking OmniRoute...
 curl.exe -s -o NUL "${OMNI}/api/monitoring/health"
 if errorlevel 1 (
   echo.
   echo [ERROR] OmniRoute offline.
-  echo Сначала запусти FreeClaude.exe — он поднимает OmniRoute.
-  echo Не запускаем OmniRoute отдельно, чтобы он не висел сиротой.
+  echo Start FreeClaude.exe first - it brings OmniRoute up.
+  echo OmniRoute is not started separately so it cannot linger as an orphan.
   echo.
   pause
   exit /b 1
@@ -984,14 +1252,100 @@ function writeSettings(model, token) {
   writeBat(model, token);
 }
 
+/**
+ * An OmniRoute that was already installed before FreeClaude can be configured in
+ * ways that quietly hide Kiro models or reject our key. omni-doctor finds those
+ * and repairs what it owns; the leftovers need a key, which only this side can write.
+ *
+ * The synced model catalog is deliberately never refreshed here: OmniRoute prefers
+ * a synced catalog over its built-in registry, so a sync we triggered could hide
+ * more models than it restores. Stale entries are dropped instead.
+ */
+/**
+ * OmniRoute caches settings, connections and the model catalog in memory, so a repair
+ * written straight to SQLite stays invisible for up to a minute. An empty settings PATCH
+ * is its own cache-bust: it writes nothing but bumps the catalog version.
+ * The per-key permission cache has no such hook and expires on its own within a minute.
+ */
+async function nudgeOmniCaches() {
+  try {
+    const res = await fetch(`${OMNI}/api/settings`, {
+      method: "PATCH",
+      headers: { Cookie: await omniDashboardCookie(), "Content-Type": "application/json" },
+      body: "{}",
+      signal: AbortSignal.timeout(10000),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function runDoctor({ repair = false, codes = null } = {}) {
+  let report;
+  try {
+    report = repair
+      ? omniKeys.repairInstall(readToken(), codes)
+      : { fixed: [], failed: [], pending: [] };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err), findings: [], fixed: [] };
+  }
+
+  const fixed = [...report.fixed];
+
+  // key-none / key-unknown / key-dead all mean Claude Code holds a key OmniRoute
+  // will not accept. Reuse our existing key if there is one, otherwise mint one.
+  if (repair && report.pending.some((c) => c.startsWith("key-"))) {
+    try {
+      const created = omniKeys.ensureApiKey("freeclaude");
+      writeSettings(readActiveModel() || "kiro/claude-sonnet-4.5", created.key);
+      fixed.push("key-reissued");
+      // The reused key may carry restrictions of its own.
+      const second = omniKeys.repairInstall(created.key, null);
+      fixed.push(...second.fixed);
+    } catch (err) {
+      report.failed.push({ code: "key-reissue", error: String(err.message || err) });
+    }
+  }
+
+  if (fixed.length) await nudgeOmniCaches();
+
+  let after;
+  try {
+    after = omniKeys.diagnoseInstall(readToken());
+  } catch (err) {
+    return { ok: false, error: String(err.message || err), findings: [], fixed };
+  }
+
+  return {
+    ok: after.ok,
+    findings: after.findings,
+    autoFixable: after.autoFixable,
+    fixed,
+    failed: report.failed,
+    dbPath: omniKeys.DB_PATH,
+  };
+}
+
+/** Best-effort pass on startup and after a Kiro login; never blocks either. */
+async function autoRepairInstall() {
+  try {
+    const report = await runDoctor({ repair: true });
+    if (report.fixed.length) console.log(st("con.doctorFixed", { list: report.fixed.join(", ") }));
+    return report;
+  } catch {
+    return null;
+  }
+}
+
 async function runCmd(command, args, opts = {}) {
-  if (opts.track && installState.cancelRequested) throw new Error("Установка остановлена");
+  if (opts.track && installState.cancelRequested) throw new Error(st("srv.installStopped"));
 
   const nodeBin = resolveNode();
   const npmBin = resolveNpm();
   const env = {
     ...process.env,
-    PATH: `${nodeDir()};${NPM_BIN};${enrichedPath()}`,
+    PATH: `${nodeDir()};${npmBinDir()};${enrichedPath()}`,
     ...(opts.env || {}),
   };
 
@@ -1051,7 +1405,7 @@ async function runCmd(command, args, opts = {}) {
       if (!settled) {
         settled = true;
         if (opts.track) installState.child = null;
-        reject(new Error(`Таймаут команды (${Math.round((opts.timeout || 1000 * 60 * 8) / 1000)}с)`));
+        reject(new Error(st("srv.cmdTimeout", { sec: Math.round((opts.timeout || 1000 * 60 * 8) / 1000) })));
       }
     }, opts.timeout || 1000 * 60 * 8);
 
@@ -1084,12 +1438,14 @@ async function runCmd(command, args, opts = {}) {
       if (opts.track) installState.child = null;
       if (carry) flushLogLine(carry);
       if (installState.cancelRequested) {
-        reject(new Error("Установка остановлена"));
+        reject(new Error(st("srv.installStopped")));
         return;
       }
       const out = `${stdout || ""}${stderr || ""}`.trim();
       if (code && code !== 0) {
-        const err = new Error(out.slice(0, 400) || `Команда завершилась с кодом ${code}${signal ? ` (${signal})` : ""}`);
+        const err = new Error(
+          out.slice(0, 400) || st("srv.cmdFailed", { code, signal: signal ? ` (${signal})` : "" })
+        );
         err.stdout = stdout;
         err.stderr = stderr;
         reject(err);
@@ -1113,12 +1469,12 @@ function requestStopInstall() {
     } catch {
       /* ignore */
     }
-    pushLog("Остановка установки…");
-    return { ok: true, stopped: true, message: "Останавливаю…" };
+    pushLog(st("log.stopInstall"));
+    return { ok: true, stopped: true, message: st("srv.stoppingNow") };
   }
   // Шаг без child (например ожидание OmniRoute) — флаг cancel уже выставлен
-  pushLog("Остановка: прерываю текущий шаг…");
-  return { ok: true, stopped: true, message: "Останавливаю ожидание…" };
+  pushLog(st("log.stopStep"));
+  return { ok: true, stopped: true, message: st("srv.stoppingWait") };
 }
 
 function pushLog(line) {
@@ -1127,7 +1483,54 @@ function pushLog(line) {
 }
 
 function assertNotCancelled() {
-  if (installState.cancelRequested) throw new Error("Установка остановлена");
+  if (installState.cancelRequested) throw new Error(st("srv.installStopped"));
+}
+
+/**
+ * Accepts the exe itself or the folder containing it, because people copy either one out
+ * of Explorer. Returns "" to clear the override.
+ */
+function validateManualPath(key, raw) {
+  const spec = PATH_KEYS[key];
+  if (!spec) throw new Error(st("srv.unknownComponent"));
+  const input = String(raw || "")
+    .trim()
+    .replace(/^"+|"+$/g, "");
+  if (!input) return "";
+
+  assertSafePath(input, spec.label);
+  const file = existingFile(input) || existingFile(path.join(input, spec.exe));
+  if (!file) throw new Error(st("srv.pathNotFound", { exe: spec.exe }));
+  if (path.basename(file).toLowerCase() !== spec.exe.toLowerCase()) {
+    throw new Error(st("srv.pathWrongExe", { exe: spec.exe, actual: path.basename(file) }));
+  }
+
+  if (key === "node") {
+    const major = nodeMajorVersion(file);
+    if (major === null) throw new Error(st("srv.nodeNotWorking"));
+    if (major < MIN_NODE_MAJOR) throw new Error(st("srv.nodeTooOld", { min: MIN_NODE_MAJOR, actual: major }));
+  }
+  return file;
+}
+
+function manualPathsView() {
+  const saved = configuredPaths();
+  const resolved = {
+    node: resolveNode(),
+    npm: resolveNpm(),
+    omniroute: whichExists(omniCmdPath()) ? omniCmdPath() : null,
+    claude: whichExists(claudeCmdPath()) ? claudeCmdPath() : null,
+  };
+  const out = {};
+  for (const key of Object.keys(PATH_KEYS)) {
+    out[key] = {
+      label: PATH_KEYS[key].label,
+      exe: PATH_KEYS[key].exe,
+      manual: String(saved[key] || ""),
+      resolved: resolved[key] || "",
+    };
+  }
+  return out;
 }
 
 async function getSetupStatus() {
@@ -1143,8 +1546,8 @@ async function getSetupStatus() {
     }
   }
 
-  const omniPath = path.join(NPM_BIN, "omniroute.cmd");
-  const claudePath = path.join(NPM_BIN, "claude.cmd");
+  const omniPath = omniCmdPath();
+  const claudePath = claudeCmdPath();
   const token = readToken();
   const omniRunning = await isOmniUp();
   const claudeOk = isClaudeCodeReady();
@@ -1152,24 +1555,181 @@ async function getSetupStatus() {
   const checks = {
     node: {
       ok: Boolean(nodeVersion),
-      detail: nodeVersion ? `${nodeVersion}${nodeBin ? ` · ${nodeBin}` : ""}` : "не найден",
+      detail: nodeVersion ? `${nodeVersion}${nodeBin ? ` · ${nodeBin}` : ""}` : st("check.notFound"),
     },
-    npm: { ok: Boolean(npmBin), detail: npmBin || "не найден" },
-    omniroute: { ok: whichExists(omniPath), detail: whichExists(omniPath) ? "установлен" : "не установлен" },
+    npm: { ok: Boolean(npmBin), detail: npmBin || st("check.notFound") },
+    omniroute: {
+      ok: whichExists(omniPath),
+      detail: whichExists(omniPath) ? st("check.installed") : st("check.notInstalled"),
+    },
     claude: {
       ok: claudeOk,
       detail: claudeOk
-        ? "установлен"
+        ? st("check.installed")
         : whichExists(claudePath)
-          ? "битый stub — нужен win32 binary"
-          : "не установлен",
+          ? st("check.brokenStub")
+          : st("check.notInstalled"),
     },
     omniRunning: { ok: omniRunning, detail: omniRunning ? "online" : "offline" },
-    token: { ok: Boolean(token), detail: token ? maskToken(token) : "не задан", masked: maskToken(token) },
+    token: { ok: Boolean(token), detail: token ? maskToken(token) : st("check.noKey"), masked: maskToken(token) },
   };
+
+  // Lets the UI mark which components are pinned to a hand-picked path.
+  const saved = configuredPaths();
+  for (const key of Object.keys(PATH_KEYS)) {
+    if (checks[key]) checks[key].manual = Boolean(saved[key]);
+  }
 
   const ready = checks.node.ok && checks.npm.ok && checks.omniroute.ok && checks.claude.ok && checks.token.ok;
   return { checks, ready, activeModel: readActiveModel(), install: { ...installState, child: undefined, log: installState.log.slice() } };
+}
+
+/**
+ * The WindowsApps alias is missing on LTSC/Server images and on machines where App
+ * Installer was never provisioned, which is what made the installer dead-end.
+ */
+function resolveWinget() {
+  const candidates = [
+    path.join(process.env.LOCALAPPDATA || "", "Microsoft", "WindowsApps", "winget.exe"),
+    whereOnPath("winget.exe"),
+  ];
+  try {
+    const store = path.join(process.env.ProgramFiles || "C:\\Program Files", "WindowsApps");
+    for (const name of fs.readdirSync(store)) {
+      if (name.startsWith("Microsoft.DesktopAppInstaller_")) candidates.push(path.join(store, name, "winget.exe"));
+    }
+  } catch {
+    // The store folder is ACL-locked for non-admins; the alias above covers the normal case.
+  }
+  for (const c of candidates) {
+    if (existingFile(c)) return c;
+  }
+  return null;
+}
+
+function psQuote(value) {
+  return String(value).replace(/'/g, "''");
+}
+
+async function runPowerShell(script, opts = {}) {
+  return runCmd("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], opts);
+}
+
+async function downloadFile(url, dest) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(15 * 60 * 1000) });
+  if (!res.ok) throw new Error(st("srv.httpStatus", { url, status: res.status }));
+  const total = Number(res.headers.get("content-length") || 0);
+  const file = fs.createWriteStream(dest);
+  let done = 0;
+  let lastPct = -10;
+  try {
+    for await (const chunk of res.body) {
+      assertNotCancelled();
+      done += chunk.length;
+      if (!file.write(chunk)) await new Promise((r) => file.once("drain", r));
+      const pct = total ? Math.floor((done / total) * 100) : 0;
+      if (total && pct >= lastPct + 10) {
+        lastPct = pct;
+        pushLog(st("log.downloadProgress", { pct, mb: Math.round(done / 1048576) }));
+      }
+    }
+  } finally {
+    await new Promise((resolve, reject) => file.end((err) => (err ? reject(err) : resolve())));
+  }
+}
+
+function pickNodeLts(list) {
+  for (const entry of list) {
+    if (!entry || !entry.lts) continue;
+    const major = Number(String(entry.version).replace(/^v/, "").split(".")[0]);
+    if (Number.isFinite(major) && major >= MIN_NODE_MAJOR) return entry.version;
+  }
+  return null;
+}
+
+/**
+ * Portable install into %LOCALAPPDATA% — no winget, no admin rights, and node-resolve
+ * already looks in that folder.
+ */
+async function installNodeFromZip() {
+  const index = await fetch("https://nodejs.org/dist/index.json", { signal: AbortSignal.timeout(60000) });
+  if (!index.ok) throw new Error(st("srv.nodeSiteDown", { status: index.status }));
+  const version = pickNodeLts(await index.json());
+  if (!version) throw new Error(st("srv.noLtsBuild", { min: MIN_NODE_MAJOR }));
+
+  const base = `node-${version}-win-x64`;
+  const parent = path.dirname(NODE_PORTABLE_DIR);
+  const zip = path.join(os.tmpdir(), `${base}.zip`);
+
+  pushLog(st("log.nodeDownloading", { version }));
+  await downloadFile(`https://nodejs.org/dist/${version}/${base}.zip`, zip);
+  assertNotCancelled();
+
+  pushLog(st("log.unpacking"));
+  fs.mkdirSync(parent, { recursive: true });
+  fs.rmSync(path.join(parent, base), { recursive: true, force: true });
+  fs.rmSync(NODE_PORTABLE_DIR, { recursive: true, force: true });
+  await runPowerShell(
+    `Expand-Archive -LiteralPath '${psQuote(zip)}' -DestinationPath '${psQuote(parent)}' -Force`,
+    { timeout: 1000 * 60 * 10, liveLog: true, track: true }
+  );
+  fs.renameSync(path.join(parent, base), NODE_PORTABLE_DIR);
+  fs.rmSync(zip, { force: true });
+  pushLog(st("log.nodeUnpacked", { dir: NODE_PORTABLE_DIR }));
+}
+
+/**
+ * A zip install is invisible to the user's own terminal, so `claude` and `omniroute`
+ * would only work from inside FreeClaude until PATH knows about them.
+ */
+async function addToUserPath(dirs) {
+  const wanted = dirs.filter(Boolean).map(psQuote);
+  if (!wanted.length) return;
+  const script = [
+    "$key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)",
+    "$kind = [Microsoft.Win32.RegistryValueKind]::ExpandString",
+    "try { $kind = $key.GetValueKind('Path') } catch {}",
+    // DoNotExpandEnvironmentNames keeps entries like %USERPROFILE% from being baked in.
+    "$cur = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)",
+    "$parts = @($cur -split ';' | Where-Object { $_ -ne '' })",
+    `$add = @('${wanted.join("','")}')`,
+    "foreach ($d in $add) { if ($parts -notcontains $d) { $parts += $d } }",
+    "$new = ($parts -join ';')",
+    "if ($new -ne $cur) { $key.SetValue('Path', $new, $kind) }",
+    "$key.Close()",
+  ].join("; ");
+  try {
+    await runPowerShell(script, { timeout: 60000 });
+    pushLog(st("log.pathUpdated"));
+  } catch (err) {
+    pushLog(st("log.pathUpdateFailed", { error: err.message }));
+  }
+}
+
+async function installNodeRuntime() {
+  const winget = resolveWinget();
+  if (winget) {
+    pushLog(st("log.nodeViaWinget"));
+    try {
+      await runCmd(
+        winget,
+        ["install", "-e", "--id", "OpenJS.NodeJS.LTS", "--accept-package-agreements", "--accept-source-agreements"],
+        { timeout: 1000 * 60 * 15, liveLog: true, track: true }
+      );
+      invalidateToolCache();
+      if (resolveNode()) return;
+      pushLog(st("log.wingetNoNode"));
+    } catch (err) {
+      assertNotCancelled();
+      pushLog(st("log.wingetFailed", { error: err.message }));
+    }
+  } else {
+    pushLog(st("log.noWinget"));
+  }
+
+  await installNodeFromZip();
+  invalidateToolCache();
+  await addToUserPath([NODE_PORTABLE_DIR, NPM_BIN]);
 }
 
 async function installAll() {
@@ -1188,19 +1748,16 @@ async function installAll() {
     let nodeBin = resolveNode();
     let npmBin = resolveNpm();
     if (!nodeBin) {
-      pushLog("Устанавливаю Node.js через winget…");
-      if (!whichExists(WINGET)) throw new Error("winget не найден. Установи Node.js вручную с nodejs.org");
-      await runCmd(WINGET, ["install", "-e", "--id", "OpenJS.NodeJS.LTS", "--accept-package-agreements", "--accept-source-agreements"], {
-        timeout: 1000 * 60 * 15,
-        liveLog: true,
-        track: true,
-      });
+      await installNodeRuntime();
       invalidateToolCache();
       nodeBin = resolveNode();
       npmBin = resolveNpm();
-      pushLog("Node.js установлен");
+      if (!nodeBin) {
+        throw new Error(st("srv.nodeNotFoundAfterInstall"));
+      }
+      pushLog(st("log.nodeInstalled", { path: nodeBin }));
     } else {
-      pushLog(`Node.js уже есть: ${(await runCmd(nodeBin, ["-v"])).trim()} (${nodeBin})`);
+      pushLog(st("log.nodeAlready", { version: (await runCmd(nodeBin, ["-v"])).trim(), path: nodeBin }));
     }
 
     assertNotCancelled();
@@ -1208,14 +1765,14 @@ async function installAll() {
       invalidateToolCache();
       npmBin = resolveNpm();
     }
-    if (!npmBin) throw new Error("npm.cmd не найден. Перезапусти FreeClaude или добавь Node в PATH.");
+    if (!npmBin) throw new Error(st("srv.npmMissing"));
 
-    const omniPath = path.join(NPM_BIN, "omniroute.cmd");
-    const claudePath = path.join(NPM_BIN, "claude.cmd");
+    const omniPath = omniCmdPath();
+    const claudePath = claudeCmdPath();
 
     installState.step = "omniroute";
     if (!whichExists(omniPath)) {
-      pushLog("Устанавливаю OmniRoute (npm i -g omniroute)…");
+      pushLog(st("log.omniInstalling"));
       await runCmd(
         npmBin,
         ["install", "-g", "omniroute", "--no-fund", "--no-audit", "--loglevel", "verbose"],
@@ -1231,17 +1788,17 @@ async function installAll() {
         }
       );
       assertNotCancelled();
-      pushLog("OmniRoute установлен");
+      pushLog(st("log.omniInstalled"));
     } else {
-      pushLog("OmniRoute уже установлен — пропускаю");
+      pushLog(st("log.omniAlready"));
     }
 
     installState.step = "claude";
     if (!isClaudeCodeReady()) {
       if (whichExists(claudePath)) {
-        pushLog("Claude Code есть, но без win32-бинарника (заглушка) — переустанавливаю с optional deps…");
+        pushLog(st("log.claudeStub"));
       } else {
-        pushLog("Устанавливаю Claude Code (npm i -g @anthropic-ai/claude-code)…");
+        pushLog(st("log.claudeInstalling"));
       }
       await runCmd(
         npmBin,
@@ -1269,9 +1826,9 @@ async function installAll() {
       );
       assertNotCancelled();
       if (!isClaudeCodeReady()) {
-        const installJs = path.join(NPM_BIN, "node_modules", "@anthropic-ai", "claude-code", "install.cjs");
+        const installJs = path.join(npmBinDir(), "node_modules", "@anthropic-ai", "claude-code", "install.cjs");
         if (whichExists(installJs)) {
-          pushLog("Запускаю postinstall Claude Code вручную…");
+          pushLog(st("log.claudePostinstall"));
           await runCmd(nodeBin || resolveNode(), [installJs], {
             timeout: 1000 * 60 * 5,
             liveLog: true,
@@ -1282,27 +1839,27 @@ async function installAll() {
       }
       if (!isClaudeCodeReady()) {
         throw new Error(
-          "Claude Code установился без нативного claude.exe. Проверь npm optional deps / интернет и повтори."
+          st("srv.claudeNoBinary")
         );
       }
-      pushLog("Claude Code установлен (win32 binary OK)");
+      pushLog(st("log.claudeInstalled"));
     } else {
-      pushLog("Claude Code уже установлен — пропускаю");
+      pushLog(st("log.claudeAlready"));
     }
 
     installState.step = "omni-start";
-    pushLog("Запускаю OmniRoute…");
+    pushLog(st("log.omniLaunching"));
     const up = await ensureOmni(180000, { liveLog: true, checkCancel: true });
     assertNotCancelled();
-    pushLog(up ? "OmniRoute online" : "OmniRoute пока offline — открой его вручную командой omniroute");
+    pushLog(up ? st("log.omniOnline") : st("log.omniOffline"));
 
     installState.step = "done";
     installState.ok = true;
-    pushLog("Готово. Добавь API-ключ OmniRoute (если ещё нет) и пользуйся.");
+    pushLog(st("log.allDone"));
   } catch (err) {
     installState.ok = false;
     installState.step = installState.cancelRequested ? "stopped" : "error";
-    pushLog(`${installState.cancelRequested ? "Остановлено" : "Ошибка"}: ${err.message || err}`);
+    pushLog(`${installState.cancelRequested ? st("log.stopped") : st("log.failed")}: ${err.message || err}`);
   } finally {
     installState.running = false;
     installState.child = null;
@@ -1446,7 +2003,38 @@ const server = http.createServer(async (req, res) => {
     const u = new URL(req.url, `http://127.0.0.1:${PORT}`);
 
     if (!isTrustedRequest(req)) {
-      return send(res, 403, { ok: false, error: "Запрос отклонён: недоверенный источник" });
+      return send(res, 403, { ok: false, error: st("srv.untrustedOrigin") });
+    }
+
+    // The whole dictionary is handed to the page as a script so the very first paint is
+    // already in the right language — no flash of English before a fetch comes back.
+    if (req.method === "GET" && u.pathname === "/i18n.js") {
+      const payload = JSON.stringify({
+        lang: currentLang(),
+        langs: i18n.LANGS,
+        dict: i18n.DICT,
+      });
+      const body = `window.FC_I18N=${payload};`;
+      res.writeHead(200, {
+        "Content-Type": "application/javascript; charset=utf-8",
+        "Cache-Control": "no-store",
+      });
+      return res.end(body);
+    }
+
+    if (req.method === "GET" && u.pathname === "/api/lang") {
+      return send(res, 200, { ok: true, lang: currentLang(), langs: i18n.LANGS });
+    }
+
+    if (req.method === "POST" && u.pathname === "/api/lang") {
+      try {
+        const body = await readBody(req);
+        const lang = i18n.normalizeLang(body.lang);
+        writeConfig({ lang });
+        return send(res, 200, { ok: true, lang });
+      } catch (err) {
+        return send(res, 500, { ok: false, error: String(err.message || err) });
+      }
     }
 
     if (req.method === "GET" && u.pathname === "/api/access") {
@@ -1470,6 +2058,12 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, await getSetupStatus());
     }
 
+    if (u.pathname === "/api/doctor" && (req.method === "GET" || req.method === "POST")) {
+      const body = req.method === "POST" ? await readBody(req) : {};
+      const codes = Array.isArray(body.codes) && body.codes.length ? body.codes : null;
+      return send(res, 200, await runDoctor({ repair: req.method === "POST", codes }));
+    }
+
     if (req.method === "POST" && u.pathname === "/api/setup/install") {
       if (!installState.running) installAll();
       return send(res, 200, { ok: true, started: true, install: { ...installState, child: undefined } });
@@ -1483,8 +2077,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && u.pathname === "/api/key") {
       const { apiKey } = await readBody(req);
       const key = String(apiKey || "").trim();
-      if (!key) return send(res, 400, { ok: false, error: "Пустой ключ" });
-      if (!TOKEN_RE.test(key)) return send(res, 400, { ok: false, error: "Недопустимый формат API-ключа" });
+      if (!key) return send(res, 400, { ok: false, error: st("srv.emptyKey") });
+      if (!TOKEN_RE.test(key)) return send(res, 400, { ok: false, error: st("srv.badToken") });
       const model = readActiveModel() || "kiro/claude-sonnet-4.5";
       writeSettings(model, key);
       return send(res, 200, { ok: true, masked: maskToken(key), activeModel: model });
@@ -1496,7 +2090,7 @@ const server = http.createServer(async (req, res) => {
         if (!account.connected) {
           return send(res, 400, {
             ok: false,
-            error: "Сначала войди в Kiro — без аккаунта ключ бесполезен",
+            error: st("srv.needKiroForKey"),
           });
         }
         // Всегда новый ключ (кнопка «Получить ключ» / смена аккаунта Kiro)
@@ -1512,7 +2106,7 @@ const server = http.createServer(async (req, res) => {
           id: created.id,
           createdAt: created.createdAt,
           reused: false,
-          note: "Новый ключ OmniRoute создан. Лимиты идут от текущего аккаунта Kiro.",
+          note: st("srv.keyNote"),
         });
       } catch (err) {
         return send(res, 500, { ok: false, error: String(err.message || err) });
@@ -1571,9 +2165,24 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && u.pathname === "/api/quota") {
       try {
         const token = readToken();
-        const usage = token
-          ? omniKeys.getKeyUsage(token)
-          : { found: false, masked: "", usedTokens: 0, remaining: null, unlimited: true, requests: 0, todayTokens: 0 };
+        const emptyUsage = {
+          found: false,
+          masked: "",
+          usedTokens: 0,
+          remaining: null,
+          unlimited: true,
+          requests: 0,
+          todayTokens: 0,
+        };
+        // Usage is a nicety; losing it must not blank out the account state below.
+        let usage = emptyUsage;
+        if (token) {
+          try {
+            usage = omniKeys.getKeyUsage(token);
+          } catch {
+            usage = emptyUsage;
+          }
+        }
         let soonest = 0;
         try {
           const h = await fetch(`${OMNI}/api/monitoring/health`, { signal: AbortSignal.timeout(2500) });
@@ -1584,7 +2193,28 @@ const server = http.createServer(async (req, res) => {
         } catch {
           /* ignore */
         }
-        const account = omniKeys.getAccountLimitInfo();
+        let account;
+        try {
+          account = omniKeys.getAccountLimitInfo();
+        } catch (err) {
+          // No database access: report what OmniRoute's own API knows rather than
+          // failing the whole call, which used to paint the account as logged out.
+          const http = await kiroStateOverHttp();
+          account = {
+            kiro: [],
+            connected: Boolean(http?.connected),
+            banned: Boolean(http?.banned),
+            banReason: null,
+            limited: false,
+            resetAt: null,
+            resetInMs: 0,
+            resetInText: null,
+            recent429: 0,
+            last429At: null,
+            degraded: true,
+            error: String(err.message || err),
+          };
+        }
         // soonestRetryAfterMs у OmniRoute бывает от старых Kiro-сессий —
         // применяем только если активный аккаунт реально в лимите
         if (soonest > 0 && account.limited) {
@@ -1661,7 +2291,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && u.pathname === "/api/kiro/open-aws") {
       const body = await readBody(req).catch(() => ({}));
       if (!kiroOAuth.verificationUriComplete && !body.url) {
-        return send(res, 400, { ok: false, error: "Нет активного кода — сначала «Войти в Kiro»" });
+        return send(res, 400, { ok: false, error: st("srv.noActiveCode") });
       }
       const url = body.url || kiroOAuth.verificationUriComplete;
       const fresh = body.fresh !== false;
@@ -1680,7 +2310,7 @@ const server = http.createServer(async (req, res) => {
       const opened = openAwsSignOut();
       return send(res, 200, {
         ok: true,
-        message: "Открыт выход из AWS. Потом снова нажми «Войти в Kiro».",
+        message: st("srv.awsSignOutOpened"),
         telegram: TELEGRAM_URL,
         ...opened,
       });
@@ -1696,28 +2326,52 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    if (req.method === "GET" && u.pathname === "/api/paths") {
+      return send(res, 200, { ok: true, paths: manualPathsView() });
+    }
+
+    if (req.method === "POST" && u.pathname === "/api/paths") {
+      try {
+        const { key, value } = await readBody(req);
+        const file = validateManualPath(key, value);
+        const paths = { ...configuredPaths() };
+        if (file) paths[key] = file;
+        else delete paths[key];
+        writeConfig({ paths });
+        invalidateToolCache();
+        return send(res, 200, { ok: true, key, value: file, paths: manualPathsView() });
+      } catch (err) {
+        return send(res, 400, { ok: false, error: String(err.message || err) });
+      }
+    }
+
+    if (req.method === "GET" && u.pathname === "/api/axiom") {
+      try {
+        return send(res, 200, { ok: true, ...axiom.state() });
+      } catch (err) {
+        return send(res, 500, { ok: false, error: String(err.message || err) });
+      }
+    }
+
+    if (req.method === "POST" && u.pathname === "/api/axiom") {
+      try {
+        const { enabled } = await readBody(req);
+        return send(res, 200, { ok: true, ...axiom.setEnabled(Boolean(enabled)) });
+      } catch (err) {
+        return send(res, 400, { ok: false, error: String(err.message || err) });
+      }
+    }
+
     if (req.method === "GET" && u.pathname === "/api/status") {
       const omni = await isOmniUp();
       let kiro = false;
-      try {
-        if (omni) {
-          try {
-            omniKeys.healKiroConnections();
-          } catch {
-            /* ignore */
-          }
-          const lim = omniKeys.getAccountLimitInfo();
-          kiro = Boolean(lim && lim.connected);
-          if (!kiro) {
-            try {
-              kiro = Boolean(omniKeys.hasKiroCredentials());
-            } catch {
-              /* ignore */
-            }
-          }
-        }
-      } catch {
-        kiro = false;
+      let kiroSource = "none";
+      let kiroDbError = null;
+      if (omni) {
+        const state = await resolveKiroConnected();
+        kiro = state.connected;
+        kiroSource = state.source;
+        kiroDbError = state.dbError;
       }
       return send(res, 200, {
         omni,
@@ -1725,6 +2379,8 @@ const server = http.createServer(async (req, res) => {
         tokenMasked: maskToken(readToken()),
         activeModel: readActiveModel(),
         kiro,
+        kiroSource,
+        kiroDbError,
       });
     }
 
@@ -1740,7 +2396,10 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && u.pathname === "/api/models") {
       if (!(await isOmniUp())) return send(res, 503, { error: "OmniRoute offline" });
       const r = await omniFetch("/v1/models");
-      if (!r.ok) return send(res, r.status, { error: r.text || "OmniRoute unavailable" });
+      if (!r.ok) {
+        const raw = r.text || "OmniRoute unavailable";
+        return send(res, r.status, { error: raw, reason: describeUpstreamError(r.status, raw, currentLang()) });
+      }
       const all = r.json?.data || [];
       const models = all
         .filter(
@@ -1770,34 +2429,46 @@ const server = http.createServer(async (req, res) => {
       const { model } = await readBody(req);
       if (!model) return send(res, 400, { ok: false, error: "model required" });
       const started = Date.now();
-      const r = await omniFetch("/v1/messages", {
-        method: "POST",
-        body: JSON.stringify({
-          model,
-          max_tokens: 16,
-          messages: [{ role: "user", content: "Reply with OK" }],
-        }),
-      });
-      const ms = Date.now() - started;
-      if (!r.ok) {
-        const err =
-          r.json?.error?.message ||
-          r.json?.message ||
-          (typeof r.json?.error === "string" ? r.json.error : null) ||
-          r.text.slice(0, 220);
-        return send(res, 200, { ok: false, status: r.status, error: String(err), ms });
+      try {
+        const r = await omniFetch("/v1/messages", {
+          method: "POST",
+          body: JSON.stringify({
+            model,
+            max_tokens: 16,
+            messages: [{ role: "user", content: "Reply with OK" }],
+          }),
+        });
+        const ms = Date.now() - started;
+        if (!r.ok) {
+          const err =
+            r.json?.error?.message ||
+            r.json?.message ||
+            (typeof r.json?.error === "string" ? r.json.error : null) ||
+            r.text.slice(0, 220);
+          return send(res, 200, { ok: false, status: r.status, error: String(err), reason: describeUpstreamError(r.status, err, currentLang()), ms });
+        }
+        return send(res, 200, { ok: true, status: r.status, reply: r.json?.content?.[0]?.text || "", ms });
+      } catch (err) {
+        // A dead OmniRoute throws instead of answering, and that is worth explaining too.
+        const message = String(err.message || err);
+        return send(res, 200, {
+          ok: false,
+          status: null,
+          error: message,
+          reason: describeUpstreamError(null, message, currentLang()),
+          ms: Date.now() - started,
+        });
       }
-      return send(res, 200, { ok: true, status: r.status, reply: r.json?.content?.[0]?.text || "", ms });
     }
 
     if (req.method === "POST" && u.pathname === "/api/connect") {
       const { model } = await readBody(req);
       if (!model) return send(res, 400, { ok: false, error: "model required" });
       if (!MODEL_RE.test(String(model).trim())) {
-        return send(res, 400, { ok: false, error: "Недопустимое имя модели" });
+        return send(res, 400, { ok: false, error: st("srv.badModel") });
       }
       const token = readToken();
-      if (!token) return send(res, 400, { ok: false, error: "Сначала сохрани API-ключ OmniRoute в блоке Настройка" });
+      if (!token) return send(res, 400, { ok: false, error: st("srv.saveKeyFirst") });
       writeSettings(String(model).trim(), token);
       return send(res, 200, { ok: true, model, activeModel: model });
     }
@@ -1805,20 +2476,22 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && u.pathname === "/api/launch") {
       const token = readToken();
       const model = readActiveModel() || "kiro/claude-sonnet-4.5";
-      if (!token) return send(res, 400, { ok: false, error: "Нет API-ключа" });
-      if (!MODEL_RE.test(model)) return send(res, 400, { ok: false, error: "Недопустимое имя модели" });
+      if (!token) return send(res, 400, { ok: false, error: st("srv.noKey") });
+      if (!MODEL_RE.test(model)) return send(res, 400, { ok: false, error: st("srv.badModel") });
       if (!(await isOmniUp())) {
         const up = await ensureOmni(60000);
-        if (!up) return send(res, 503, { ok: false, error: "OmniRoute не запустился" });
+        if (!up) return send(res, 503, { ok: false, error: st("srv.omniStartFailed") });
       }
       writeSettings(model, token);
+      assertSafePath(nodeDir(), "Node.js");
+      assertSafePath(npmBinDir(), "npm");
 
       const launcher = path.join(DATA_DIR, "launch-claude.cmd");
       fs.writeFileSync(
         launcher,
         `@echo off
 setlocal EnableExtensions
-set "PATH=${nodeDir().replace(/\\/g, "\\\\")};%APPDATA%\\npm;%PATH%"
+set "PATH=${nodeDir()};${npmBinDir()};%PATH%"
 title Claude Code - ${model}
 echo.
 echo  Model: ${model}
@@ -1834,7 +2507,7 @@ if errorlevel 1 pause
         stdio: "ignore",
         windowsHide: false,
         cwd: DATA_DIR,
-        env: { ...process.env, PATH: `${nodeDir()};${NPM_BIN};${enrichedPath()}` },
+        env: { ...process.env, PATH: `${nodeDir()};${npmBinDir()};${enrichedPath()}` },
       }).unref();
 
       return send(res, 200, { ok: true, model });
@@ -1939,21 +2612,19 @@ async function main() {
       IS_PKG && fs.existsSync(path.join(diskPublicRoot, "index.html")) ? diskPublicRoot : PUBLIC;
     console.log(`FreeClaude GUI: http://127.0.0.1:${PORT}`);
     console.log(`UI assets: ${IS_PKG ? (uiRoot === diskPublicRoot ? "disk" : "snapshot") : "dev"} → ${uiRoot}`);
-    console.log("Одна консоль: OmniRoute стартует в фоне, отдельное окно не нужно.");
+    console.log(st("con.oneConsole"));
 
     openWindow();
 
     try {
-      if (
-        whichExists(path.join(NPM_BIN, "omniroute.cmd")) ||
-        whichExists(path.join(NPM_BIN, "node_modules", "omniroute", "bin", "omniroute.mjs"))
-      ) {
+      if (isOmniRouteInstalled()) {
         const ok = await ensureOmni();
         if (ok) {
           console.log("OmniRoute online");
-          console.log("Закроете это окно FreeClaude — OmniRoute тоже остановится.");
+          console.log(st("con.closeNote"));
+          await autoRepairInstall();
         } else {
-          console.log("OmniRoute offline — открой Настройки → Установить недостающее");
+          console.log(st("con.omniOffline"));
         }
       } else {
         console.log("OmniRoute not installed — open Setup in GUI");
@@ -1962,6 +2633,14 @@ async function main() {
       console.error("OmniRoute bootstrap error:", err && err.message ? err.message : err);
     }
   });
+}
+
+// A module left out of the pkg snapshot only fails at runtime, and every file can still
+// be present on disk. The release build boots the exe with this flag: reaching here means
+// all requires resolved and the dictionary is readable, then we exit without taking a port.
+if (process.env.FREECLAUDE_SELFTEST === "1") {
+  console.log(`selftest ok: ${st("con.oneConsole")}`);
+  process.exit(0);
 }
 
 main().catch((e) => {

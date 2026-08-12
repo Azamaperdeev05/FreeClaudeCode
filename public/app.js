@@ -1,3 +1,42 @@
+/**
+ * The dictionary is delivered by the server as `window.FC_I18N` in a script tag that runs
+ * before this file, so the very first paint is already in the chosen language instead of
+ * flashing English and then correcting itself.
+ */
+const lang = {
+  code: window.FC_I18N?.lang || "en",
+  dict: window.FC_I18N?.dict || { en: {} },
+  list: window.FC_I18N?.langs || ["en"],
+};
+
+function t(key, vars) {
+  const table = lang.dict[lang.code] || lang.dict.en || {};
+  let out = table[key];
+  if (out === undefined) out = (lang.dict.en || {})[key];
+  if (out === undefined) return key;
+  if (!vars) return out;
+  return out.replace(/\{(\w+)\}/g, (whole, name) =>
+    Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name]) : whole
+  );
+}
+
+/** Fills every `data-i18n*` slot; run once at load and again after a language switch. */
+function applyI18n(root = document) {
+  root.querySelectorAll("[data-i18n]").forEach((el) => {
+    el.textContent = t(el.dataset.i18n);
+  });
+  root.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
+    el.placeholder = t(el.dataset.i18nPlaceholder);
+  });
+  root.querySelectorAll("[data-i18n-title]").forEach((el) => {
+    el.title = t(el.dataset.i18nTitle);
+  });
+  root.querySelectorAll("[data-i18n-aria]").forEach((el) => {
+    el.setAttribute("aria-label", t(el.dataset.i18nAria));
+  });
+  document.documentElement.lang = lang.code;
+}
+
 /** A corrupt value here used to throw during init and leave the user with a blank page. */
 function readStoredResults() {
   try {
@@ -32,6 +71,10 @@ const state = {
   quotaPoll: null,
   setupPoll: null,
   tab: "home",
+  // Kept so a language switch can repaint server-sourced text without waiting on a refetch.
+  lastSetup: null,
+  lastQuota: null,
+  lastDoctor: null,
 };
 
 const els = {
@@ -65,6 +108,10 @@ const els = {
   btnInstallAll: document.getElementById("btnInstallAll"),
   btnStopInstall: document.getElementById("btnStopInstall"),
   btnGenKey: document.getElementById("btnGenKey"),
+  axiomBox: document.getElementById("axiomBox"),
+  axiomToggle: document.getElementById("axiomToggle"),
+  axiomState: document.getElementById("axiomState"),
+  axiomMeta: document.getElementById("axiomMeta"),
   btnOpenKiro: document.getElementById("btnOpenKiro"),
   btnAwsSignOut: document.getElementById("btnAwsSignOut"),
   limitBanner: document.getElementById("limitBanner"),
@@ -72,6 +119,13 @@ const els = {
   limitTimer: document.getElementById("limitTimer"),
   limitBannerHint: document.getElementById("limitBannerHint"),
   btnLimitSwitch: document.getElementById("btnLimitSwitch"),
+  pathModal: document.getElementById("pathModal"),
+  pathModalTitle: document.getElementById("pathModalTitle"),
+  pathModalSub: document.getElementById("pathModalSub"),
+  pathInput: document.getElementById("pathInput"),
+  pathNow: document.getElementById("pathNow"),
+  btnPathSave: document.getElementById("btnPathSave"),
+  btnPathReset: document.getElementById("btnPathReset"),
   kiroModal: document.getElementById("kiroModal"),
   kiroUserCode: document.getElementById("kiroUserCode"),
   kiroStatus: document.getElementById("kiroStatus"),
@@ -80,6 +134,13 @@ const els = {
   kiroWaitSub: document.getElementById("kiroWaitSub"),
   btnKiroOpenAws: document.getElementById("btnKiroOpenAws"),
   btnKiroRetry: document.getElementById("btnKiroRetry"),
+  kiroSteps: document.getElementById("kiroSteps"),
+  kiroPollSub: document.getElementById("kiroPollSub"),
+  kiroElapsed: document.getElementById("kiroElapsed"),
+  btnKiroCopy: document.getElementById("btnKiroCopy"),
+  langPicker: document.getElementById("langPicker"),
+  btnDoctor: document.getElementById("btnDoctor"),
+  doctorResult: document.getElementById("doctorResult"),
 };
 
 let toastTimer = null;
@@ -108,7 +169,7 @@ async function api(url, options) {
     }
   }
   if (!res.ok) {
-    throw new Error((data && (data.error || data.message)) || `Ошибка ${res.status}`);
+    throw new Error((data && (data.error || data.message)) || t("toast.httpError", { status: res.status }));
   }
   return data ?? {};
 }
@@ -119,6 +180,14 @@ function esc(s) {
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
+}
+
+/** Retitle a button without wiping the inline icon that sits before its label. */
+function setBtnLabel(btn, text) {
+  if (!btn) return;
+  const label = btn.querySelector(".btn-label");
+  if (label) label.textContent = text;
+  else btn.textContent = text;
 }
 
 function toast(msg, isErr = false) {
@@ -132,8 +201,7 @@ function toast(msg, isErr = false) {
     /* keep raw */
   }
   if (/invalid password/i.test(text)) {
-    text =
-      "Неверный пароль OmniRoute. Открой http://127.0.0.1:20128 — часто пароль CHANGEME.";
+    text = t("toast.badOmniPassword");
   }
   els.toast.textContent = text;
   els.toast.classList.toggle("err", Boolean(isErr));
@@ -161,6 +229,7 @@ function setTab(tab) {
   if (state.tab === "setup") {
     loadSetup();
     loadQuota().catch(() => {});
+    loadAxiom();
   }
 }
 
@@ -180,29 +249,63 @@ function visible() {
   });
 }
 
-function modelIconSlug(id) {
+/** Brand mark per provider: slug for the CDN logo, plus a local colour + letter fallback. */
+const BRANDS = {
+  claude: { slug: "claude-color", color: "#d97757", mono: "C" },
+  deepseek: { slug: "deepseek-color", color: "#4d6bfe", mono: "D" },
+  chatglm: { slug: "chatglm-color", color: "#4268fa", mono: "G" },
+  openai: { slug: "openai", color: "#d7dbe6", mono: "O" },
+  minimax: { slug: "minimax-color", color: "#f23f5d", mono: "M" },
+  qwen: { slug: "qwen-color", color: "#7a5cff", mono: "Q" },
+  kiro: { slug: "kiro-color", color: "#7c6cff", mono: "K" },
+};
+
+function modelBrand(id) {
   const s = String(id || "").toLowerCase().replace(/^(kiro|kr)\//, "");
-  if (/claude|haiku|sonnet|opus/.test(s)) return "claude-color";
-  if (/deepseek/.test(s)) return "deepseek-color";
-  if (/glm|chatglm|zhipu/.test(s)) return "chatglm-color";
+  if (/claude|haiku|sonnet|opus/.test(s)) return "claude";
+  if (/deepseek/.test(s)) return "deepseek";
+  if (/glm|chatglm|zhipu/.test(s)) return "chatglm";
   if (/gpt|openai|luna|sol|terra/.test(s)) return "openai";
-  if (/minimax/.test(s)) return "minimax-color";
-  if (/qwen/.test(s)) return "qwen-color";
-  return "kiro-color";
+  if (/minimax/.test(s)) return "minimax";
+  if (/qwen/.test(s)) return "qwen";
+  return "kiro";
+}
+
+function modelIconSlug(id) {
+  return BRANDS[modelBrand(id)].slug;
+}
+
+/**
+ * The logo is a progressive enhancement: the monogram shows immediately and the CDN image
+ * only replaces it once it actually loads, so an offline run never shows a broken icon.
+ */
+function modelIconImgHtml(id) {
+  const src = `https://unpkg.com/@lobehub/icons-static-svg@latest/icons/${modelIconSlug(id)}.svg`;
+  return (
+    `<img src="${src}" alt="" loading="lazy" decoding="async"` +
+    ` onload="this.parentNode.classList.add('has-img')" onerror="this.remove()" />`
+  );
 }
 
 function modelIconHtml(id) {
-  const slug = modelIconSlug(id);
-  const src = `https://unpkg.com/@lobehub/icons-static-svg@latest/icons/${slug}.svg`;
-  const fallback = "https://unpkg.com/@lobehub/icons-static-svg@latest/icons/kiro-color.svg";
-  return `<div class="icon" title="${esc(slug.replace(/-color$/, ""))}"><img src="${src}" alt="" loading="lazy" decoding="async" onerror="this.onerror=null;this.src='${fallback}'" /></div>`;
+  const brand = modelBrand(id);
+  const b = BRANDS[brand];
+  return (
+    `<div class="icon" data-brand="${brand}" style="--brand:${b.color}" title="${esc(brand)}">` +
+    `<span class="icon-mono" aria-hidden="true">${b.mono}</span>${modelIconImgHtml(id)}</div>`
+  );
 }
 
-function modelIconImgHtml(id) {
-  const slug = modelIconSlug(id);
-  const src = `https://unpkg.com/@lobehub/icons-static-svg@latest/icons/${slug}.svg`;
-  const fallback = "https://unpkg.com/@lobehub/icons-static-svg@latest/icons/kiro-color.svg";
-  return `<img src="${src}" alt="" loading="lazy" decoding="async" onerror="this.onerror=null;this.src='${fallback}'" />`;
+/** Paint an existing `.icon` element (the active-model bar reuses one node). */
+function fillModelIcon(el, id) {
+  if (!el) return;
+  const brand = modelBrand(id);
+  const b = BRANDS[brand];
+  el.classList.remove("has-img");
+  el.dataset.brand = brand;
+  el.style.setProperty("--brand", b.color);
+  el.title = brand;
+  el.innerHTML = `<span class="icon-mono" aria-hidden="true">${b.mono}</span>${modelIconImgHtml(id)}`;
 }
 
 function formatCountdown(ms) {
@@ -226,30 +329,31 @@ function updateLimitTicker() {
 
   if (els.limitBanner) els.limitBanner.classList.remove("hidden");
   if (els.limitBannerTitle) {
-    els.limitBannerTitle.textContent = lim.banned ? "Аккаунт Kiro заблокирован" : "Лимит на аккаунте Kiro";
+    els.limitBannerTitle.textContent = lim.banned ? t("limit.titleBanned") : t("limit.title");
   }
   if (els.limitBannerHint) {
     els.limitBannerHint.textContent = lim.banned
-      ? shortBanReason(lim.hint) + " — смените аккаунт"
-      : "Поменяйте аккаунт или дождитесь снятия лимита";
+      ? t("limit.hintBanned", { reason: shortBanReason(lim.hint) })
+      : t("limit.hint");
   }
 
   let leftMs = 0;
   if (lim.resetAt) leftMs = Math.max(0, lim.resetAt - Date.now());
   const timerText = lim.banned
-    ? "нужен другой аккаунт"
+    ? t("limit.needAnother")
     : leftMs > 0
-      ? `Снимется через ${formatCountdown(leftMs)}`
-      : "Проверяю статус…";
+      ? t("limit.clearsIn", { time: formatCountdown(leftMs) })
+      : t("limit.checking");
 
   if (els.limitTimer) els.limitTimer.textContent = timerText;
 
   if (els.accountState && lim.limited && !lim.banned) {
     els.accountState.className = "al-state limited";
-    els.accountState.textContent = leftMs > 0 ? `лимит · ${formatCountdown(leftMs)}` : "лимит";
+    els.accountState.textContent =
+      leftMs > 0 ? t("account.limitedFor", { time: formatCountdown(leftMs) }) : t("account.limited");
     if (els.accountMeta) {
       els.accountMeta.textContent =
-        leftMs > 0 ? `подожди ${formatCountdown(leftMs)} или смени аккаунт` : "подожди или смени аккаунт";
+        leftMs > 0 ? t("account.waitOrSwitch", { time: formatCountdown(leftMs) }) : t("account.waitOrSwitchNow");
     }
   }
 
@@ -292,7 +396,7 @@ function applyAccountLimit(account, serverNow) {
     const skew = serverNow ? Date.now() - Number(serverNow) : 0;
     resetAt = Date.now() - skew + Number(a.resetInMs);
   }
-  // Короткие cooldown (< 60с) не считаем «лимитом аккаунта» — иначе баннер мигает при работе.
+  // A short cooldown (< 60s) is not an "account limit" — otherwise the banner flickers in use.
   const MIN_UI_LIMIT_MS = 60 * 1000;
   const leftNow = resetAt ? Math.max(0, resetAt - Date.now()) : Number(a.resetInMs || 0);
   const seriousLimit = Boolean(a.limited) && leftNow >= MIN_UI_LIMIT_MS;
@@ -321,30 +425,29 @@ function updateLaunchButtons() {
   els.btnLaunch.disabled = !ready;
   if (els.btnLaunchBar) els.btnLaunchBar.disabled = !ready;
 
-  // Активную модель показываем только при живой сессии (OmniRoute + Kiro)
+  // The active model is only shown with a live session (OmniRoute + Kiro).
   if (state.activeModel && hasSession) {
     els.activeBar.classList.remove("hidden");
     els.activeBarModel.textContent = state.activeModel;
-    if (els.activeBarIcon) {
-      els.activeBarIcon.title = modelIconSlug(state.activeModel).replace(/-color$/, "");
-      els.activeBarIcon.innerHTML = modelIconImgHtml(state.activeModel);
-    }
+    fillModelIcon(els.activeBarIcon, state.activeModel);
     els.modelTag.textContent = state.activeModel;
     els.modelTag.classList.remove("soft");
   } else {
     els.activeBar.classList.add("hidden");
     if (els.activeBarIcon) {
       els.activeBarIcon.innerHTML = "";
+      els.activeBarIcon.classList.remove("has-img");
+      els.activeBarIcon.removeAttribute("data-brand");
       els.activeBarIcon.removeAttribute("title");
     }
     if (!state.omniOnline) {
       els.modelTag.textContent = "OmniRoute offline";
     } else if (!state.kiroConnected) {
-      els.modelTag.textContent = "нет аккаунта Kiro";
+      els.modelTag.textContent = t("models.tagNoAccount");
     } else if (state.limit?.banned) {
-      els.modelTag.textContent = "аккаунт заблокирован";
+      els.modelTag.textContent = t("models.tagBanned");
     } else {
-      els.modelTag.textContent = "не выбрана";
+      els.modelTag.textContent = t("models.tagNone");
     }
     els.modelTag.classList.add("soft");
   }
@@ -356,29 +459,44 @@ function updateAuthButtons(connected, opts = {}) {
   if (els.btnOpenKiro) {
     els.btnOpenKiro.classList.toggle("hidden", state.kiroConnected && !banned);
     els.btnOpenKiro.disabled = false;
-    els.btnOpenKiro.textContent = banned ? "Сменить аккаунт" : "Войти в Kiro";
+    setBtnLabel(els.btnOpenKiro, banned ? t("key.switchAccount") : t("key.openKiro"));
   }
   if (els.btnAwsSignOut) {
-    // Только когда есть сессия Kiro / бан — иначе кнопка выхода не нужна
+    // Only with a Kiro session or a ban — otherwise there is nothing to sign out of.
     els.btnAwsSignOut.classList.toggle("hidden", !state.kiroConnected && !banned);
     els.btnAwsSignOut.disabled = false;
   }
   if (els.btnGenKey) {
     els.btnGenKey.disabled = !state.kiroConnected;
     els.btnGenKey.title = state.kiroConnected
-      ? "Создать локальный ключ OmniRoute"
+      ? t("key.genTitleReady")
       : banned
-        ? "Аккаунт Kiro заблокирован"
-        : "Сначала войди в Kiro";
+        ? t("key.genTitleBanned")
+        : t("key.genTitleNeedLogin");
   }
   if (state.models.length) render();
   else updateLaunchButtons();
 }
 
+/**
+ * Probe results are cached in localStorage with the wording from whichever language was
+ * active at the time, so re-derive the text from `kind` and only fall back to the stored
+ * sentence for results saved before kinds existed.
+ */
+function reasonTitle(reason) {
+  if (!reason) return t("toast.error");
+  return reason.kind ? t(`err.${reason.kind}.title`) : reason.title || t("toast.error");
+}
+
+function reasonHint(reason) {
+  if (!reason) return "";
+  return reason.kind ? t(`err.${reason.kind}.hint`) : reason.hint || "";
+}
+
 function shortBanReason(text) {
   const s = String(text || "");
-  if (/suspend|banned|locked/i.test(s)) return "Kiro временно заблокировал аккаунт";
-  return (s.slice(0, 120) || "аккаунт недоступен");
+  if (/suspend|banned|locked/i.test(s)) return t("account.tempBanned");
+  return s.slice(0, 120) || t("account.unavailable");
 }
 
 function setStatusIcon(el, mode) {
@@ -400,8 +518,8 @@ function renderConn(status) {
   else els.connSub.textContent = text;
   setStatusIcon(els.connSub, online);
   els.connMeta.textContent = online
-    ? `ключ ${status.token ? status.tokenMasked || "есть" : "нет"}`
-    : "localhost:20128 недоступен";
+    ? t("conn.keyPresent", { state: status.token ? status.tokenMasked || t("conn.keyYes") : t("conn.keyNo") })
+    : t("conn.omniDown");
   if (els.sideStatusText) els.sideStatusText.textContent = online ? "online" : "offline";
   else els.sideStatus.textContent = online ? "online" : "offline";
   setStatusIcon(els.sideStatus, online);
@@ -410,22 +528,94 @@ function renderConn(status) {
   else updateLaunchButtons();
 }
 
+const PATHABLE = new Set(["node", "npm", "omniroute", "claude"]);
+const pathDialog = { key: null };
+
+function hidePathModal() {
+  if (!els.pathModal) return;
+  els.pathModal.classList.add("hidden");
+  els.pathModal.setAttribute("aria-hidden", "true");
+  pathDialog.key = null;
+}
+
+async function openPathDialog(key) {
+  if (!els.pathModal) return;
+  let info;
+  try {
+    info = (await api("/api/paths")).paths[key];
+  } catch (e) {
+    toast(String(e.message || e), true);
+    return;
+  }
+  if (!info) return;
+
+  pathDialog.key = key;
+  els.pathModalTitle.textContent = t("path.titleFor", { name: info.label });
+  els.pathModalSub.textContent = t("path.subFor", { exe: info.exe });
+  els.pathInput.value = info.manual || "";
+  els.pathInput.placeholder = info.resolved || `C:\\…\\${info.exe}`;
+  els.pathNow.textContent = info.resolved ? t("path.current", { path: info.resolved }) : t("path.notFound");
+  els.btnPathReset.classList.toggle("hidden", !info.manual);
+  els.pathModal.classList.remove("hidden");
+  els.pathModal.setAttribute("aria-hidden", "false");
+  els.pathInput.focus();
+  els.pathInput.select();
+}
+
+async function savePathValue(value) {
+  if (!pathDialog.key) return;
+  const key = pathDialog.key;
+  els.btnPathSave.disabled = true;
+  els.btnPathReset.disabled = true;
+  try {
+    await api("/api/paths", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key, value }),
+    });
+    toast(value ? t("path.saved") : t("path.cleared"));
+    hidePathModal();
+    loadSetup();
+  } catch (e) {
+    toast(String(e.message || e), true);
+  } finally {
+    els.btnPathSave.disabled = false;
+    els.btnPathReset.disabled = false;
+  }
+}
+
 function renderSetup(setup) {
+  state.lastSetup = setup;
   const labels = {
-    node: "Node.js",
-    npm: "npm",
-    omniroute: "OmniRoute",
-    claude: "Claude Code",
-    omniRunning: "Сервер",
-    token: "API-ключ",
+    node: t("check.node"),
+    npm: t("check.npm"),
+    omniroute: t("check.omniroute"),
+    claude: t("check.claude"),
+    omniRunning: t("check.omniRunning"),
+    token: t("check.token"),
+  };
+  const icons = {
+    node: "i-node",
+    npm: "i-box",
+    omniroute: "i-route",
+    claude: "i-terminal",
+    omniRunning: "i-server",
+    token: "i-key",
   };
   const order = ["node", "npm", "omniroute", "claude", "omniRunning", "token"];
   els.checkGrid.innerHTML = order
     .map((key) => {
       const item = setup.checks[key];
-      return `<div class="check-item ${item.ok ? "ok" : "bad"}">
-        <div class="label">${labels[key]}</div>
-        <div class="value"><span class="mark">${item.ok ? "✓" : "!"}</span>${item.ok ? "OK" : "Нет"}</div>
+      const gear = PATHABLE.has(key)
+        ? `<button class="check-gear" type="button" data-path-key="${key}" title="${esc(t("setup.pathManual"))}" aria-label="${esc(t("setup.pathManualFor", { name: labels[key] }))}"><svg class="ic" aria-hidden="true"><use href="#i-gear"/></svg></button>`
+        : "";
+      const manual = item.manual ? " manual" : "";
+      return `<div class="check-item ${item.ok ? "ok" : "bad"}${manual}">
+        <div class="check-top">
+          <div class="label"><span class="check-ico" aria-hidden="true"><svg class="ic"><use href="#${icons[key]}"/></svg></span>${labels[key]}</div>
+          ${gear}
+        </div>
+        <div class="value"><span class="mark">${item.ok ? "✓" : "!"}</span>${esc(item.ok ? t("setup.ok") : t("setup.missing"))}</div>
         <div class="detail">${esc(item.detail)}</div>
       </div>`;
     })
@@ -435,7 +625,7 @@ function renderSetup(setup) {
     if (els.keyCurrent) els.keyCurrent.textContent = setup.checks.token.masked;
     if (!els.apiKey.value) els.apiKey.placeholder = setup.checks.token.masked;
   } else if (els.keyCurrent) {
-    els.keyCurrent.textContent = "нет ключа";
+    els.keyCurrent.textContent = t("key.none");
   }
 
   const inst = setup.install || {};
@@ -450,9 +640,10 @@ function renderSetup(setup) {
     }
   }
   els.btnInstallAll.disabled = Boolean(inst.running);
-  els.btnInstallAll.textContent = inst.running
-    ? `Установка…${inst.step ? ` (${inst.step})` : ""}`
-    : "Установить недостающее";
+  setBtnLabel(
+    els.btnInstallAll,
+    inst.running ? `${t("setup.installing")}${inst.step ? ` (${inst.step})` : ""}` : t("setup.installAll")
+  );
   if (els.btnStopInstall) {
     els.btnStopInstall.classList.toggle("hidden", !inst.running);
     els.btnStopInstall.disabled = !inst.running;
@@ -460,8 +651,9 @@ function renderSetup(setup) {
 }
 
 function renderQuota(data) {
+  state.lastQuota = data;
   const u = data.usage || {};
-  if (els.keyCurrent) els.keyCurrent.textContent = data.activeKey || u.masked || "нет ключа";
+  if (els.keyCurrent) els.keyCurrent.textContent = data.activeKey || u.masked || t("key.none");
   if (els.usageUsed) els.usageUsed.textContent = formatTokens(u.usedTokens);
   if (els.usageLeft) els.usageLeft.textContent = u.unlimited || u.remaining == null ? "∞" : formatTokens(u.remaining);
   if (els.usageReq) els.usageReq.textContent = String(u.requests ?? 0);
@@ -474,20 +666,26 @@ function renderQuota(data) {
   if (els.accountState && els.accountMeta) {
     if (a.banned) {
       els.accountState.className = "al-state limited";
-      els.accountState.textContent = "заблокирован";
+      els.accountState.textContent = t("account.blocked");
       els.accountMeta.textContent = shortBanReason(a.banReason);
     } else if (!a.connected) {
       els.accountState.className = "al-state off";
-      els.accountState.textContent = "не подключён";
-      els.accountMeta.textContent = "нажми «Войти в Kiro»";
+      els.accountState.textContent = t("account.offline");
+      els.accountMeta.textContent = t("account.offlineHint");
     } else if (a.limited) {
       // live text updated by updateLimitTicker
       updateLimitTicker();
     } else {
       const k = (a.kiro || []).find((x) => x.state === "ok") || (a.kiro || [])[0];
       els.accountState.className = "al-state ok";
-      els.accountState.textContent = "активен";
-      els.accountMeta.textContent = k?.oauthLeftText ? `OAuth ещё ${k.oauthLeftText}` : "ok";
+      els.accountState.textContent = t("account.active");
+      // Degraded means the state came from OmniRoute over HTTP, without the local
+      // database — the account is fine, only the counters are missing.
+      els.accountMeta.textContent = a.degraded
+        ? t("account.degraded")
+        : k?.oauthLeftText
+          ? t("account.oauthLeft", { time: k.oauthLeftText })
+          : t("account.ok");
     }
   }
 }
@@ -497,11 +695,11 @@ async function awsSignOut() {
   try {
     const r = await fetch("/api/kiro/aws-signout", { method: "POST" }).then((x) => x.json());
     if (!r.ok) {
-      toast(r.error || "Не удалось открыть выход AWS", true);
+      toast(r.error || t("kiro.awsSignOutFailed"), true);
       return;
     }
     updateAuthButtons(false);
-    toast("Открыт выход AWS. Закрой окно и снова войди в Kiro");
+    toast(t("kiro.awsSignOutOpened"));
     await loadQuota().catch(() => {});
   } catch (e) {
     toast(String(e.message || e), true);
@@ -511,9 +709,13 @@ async function awsSignOut() {
 }
 
 async function openKiroAuth() {
+  const kiroBtnLabel = els.btnOpenKiro?.querySelector(".btn-label")?.textContent || t("key.openKiro");
   if (els.btnOpenKiro) els.btnOpenKiro.disabled = true;
+  // Starting the flow can take a while when OmniRoute has to be restarted first
+  // (for example after its panel password was reset), so say something meanwhile.
+  setBtnLabel(els.btnOpenKiro, t("key.connecting"));
   try {
-    // Сброс старых Kiro-сессий OmniRoute перед новым входом
+    // Drop OmniRoute's old Kiro sessions before starting a new sign-in.
     await fetch("/api/kiro/logout", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -526,7 +728,7 @@ async function openKiroAuth() {
       body: JSON.stringify({ open: false }),
     }).then((x) => x.json());
     if (!r.ok) {
-      toast(r.error || "Не удалось начать вход в Kiro", true);
+      toast(r.error || t("kiro.startFailed"), true);
       return;
     }
 
@@ -535,36 +737,40 @@ async function openKiroAuth() {
     kiroAuth.verificationUriComplete = r.verificationUriComplete || "";
 
     if (els.kiroUserCode) els.kiroUserCode.textContent = r.userCode || "—";
-    setKiroStatus("Ждём подтверждение…");
-    setKiroWait(
-      "wait",
-      "Ждём вход в AWS…",
-      "Открыто чистое окно без старой сессии — войди нужным аккаунтом и подтверди код."
-    );
-    if (els.btnKiroRetry) {
-      els.btnKiroRetry.disabled = true;
-      els.btnKiroRetry.textContent = "Ждём…";
+    setKiroStatus(t("kiro.openingAws"));
+    setKiroStep("open");
+    startKiroClock();
+    setKiroWait("wait", t("kiro.openingAws"), t("kiro.openingAwsSub"));
+    if (els.kiroPollSub) {
+      els.kiroPollSub.textContent = t("kiro.step.code.subEvery", {
+        sec: Math.round(kiroAuth.intervalMs / 1000),
+      });
     }
+    setKiroRetryButton("waiting");
     if (els.kiroModal) {
       els.kiroModal.classList.remove("hidden");
       els.kiroModal.setAttribute("aria-hidden", "false");
     }
 
     const ok = await openAwsWindow(kiroAuth.verificationUriComplete, { fresh: true });
-    if (!ok) {
-      setKiroWait(
-        "wait",
-        "Не удалось открыть AWS",
-        "Нажми «Открыть / обновить AWS»."
-      );
+    if (ok) {
+      setKiroStep("code");
+      setKiroStatus(t("kiro.awaitingConfirm"));
+      setKiroWait("wait", t("kiro.awaitingTitle"), t("kiro.awaitingSub"));
+    } else {
+      // Polling still runs: the user can finish the login in any browser with the same code.
+      setKiroStep("open", "error");
+      setKiroStatus(t("kiro.awsNotOpened"), true);
+      setKiroWait("wait", t("kiro.awsNotOpenedTitle"), t("kiro.awsNotOpenedSub"));
     }
 
-    toast(`Код: ${r.userCode || "—"} · подтверди в чистом окне AWS`);
+    toast(t("kiro.codeToast", { code: r.userCode || "—" }));
     if (kiroAuth.timer) clearTimeout(kiroAuth.timer);
     kiroAuth.timer = setTimeout(pollKiroLoop, 2500);
   } catch (e) {
     toast(String(e.message || e), true);
   } finally {
+    setBtnLabel(els.btnOpenKiro, kiroBtnLabel);
     // Re-enabling while polling is live would let a second click start an overlapping session.
     if (els.btnOpenKiro) els.btnOpenKiro.disabled = kiroAuth.active;
   }
@@ -590,7 +796,76 @@ const kiroAuth = {
   verificationUriComplete: "",
   active: false,
   awsWin: null,
+  startedAt: 0,
+  attempts: 0,
+  tick: null,
 };
+
+/*
+ * The device flow has no progress to report, so the modal shows which stage it is on.
+ * Order matters: everything before the current step is drawn as finished.
+ */
+const KIRO_STEPS = ["open", "code", "link", "models"];
+
+/** `name` may also be "done", which completes every step. */
+function setKiroStep(name, mode = "active") {
+  if (!els.kiroSteps) return;
+  const idx = name === "done" ? KIRO_STEPS.length : KIRO_STEPS.indexOf(name);
+  if (idx < 0) return;
+  for (const li of els.kiroSteps.querySelectorAll(".kiro-step")) {
+    const i = KIRO_STEPS.indexOf(li.dataset.step);
+    li.classList.toggle("done", i < idx);
+    li.classList.toggle("active", i === idx && mode === "active");
+    li.classList.toggle("error", i === idx && mode === "error");
+  }
+}
+
+function startKiroClock() {
+  kiroAuth.startedAt = Date.now();
+  kiroAuth.attempts = 0;
+  stopKiroClock(true);
+  kiroAuth.tick = setInterval(renderKiroElapsed, 1000);
+  renderKiroElapsed();
+}
+
+function stopKiroClock(keepText = false) {
+  if (kiroAuth.tick) {
+    clearInterval(kiroAuth.tick);
+    kiroAuth.tick = null;
+  }
+  if (!keepText && els.kiroElapsed) els.kiroElapsed.textContent = "";
+}
+
+function renderKiroElapsed() {
+  if (!els.kiroElapsed || !kiroAuth.startedAt) return;
+  const sec = Math.floor((Date.now() - kiroAuth.startedAt) / 1000);
+  els.kiroElapsed.textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+}
+
+async function copyKiroCode() {
+  const code = (els.kiroUserCode?.textContent || "").trim();
+  if (!code || /^—+$/.test(code)) return;
+  let ok = false;
+  try {
+    await navigator.clipboard.writeText(code);
+    ok = true;
+  } catch {
+    // Clipboard API needs a secure context; the local page is http, so fall back.
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = code;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      ok = document.execCommand("copy");
+      ta.remove();
+    } catch {
+      ok = false;
+    }
+  }
+  toast(ok ? t("kiro.copied", { code }) : t("kiro.copyFailed"), !ok);
+}
 
 /**
  * Polling has stopped for good. Clearing `active` too is what keeps the modal from
@@ -603,6 +878,25 @@ function stopKiroPolling() {
     kiroAuth.timer = null;
   }
   if (els.btnOpenKiro) els.btnOpenKiro.disabled = false;
+}
+
+/**
+ * The click handler reads `dataset.action`, not the label: comparing against a translated
+ * caption would silently stop working the moment the language changes.
+ */
+function setKiroRetryButton(mode) {
+  const btn = els.btnKiroRetry;
+  if (!btn) return;
+  const modes = {
+    waiting: { key: "kiro.retryWaiting", disabled: true, action: "" },
+    retry: { key: "kiro.retry", disabled: false, action: "retry" },
+    done: { key: "kiro.done", disabled: false, action: "" },
+  };
+  const m = modes[mode] || modes.waiting;
+  btn.dataset.i18n = m.key;
+  btn.dataset.action = m.action;
+  btn.textContent = t(m.key);
+  btn.disabled = m.disabled;
 }
 
 function setKiroStatus(text, isErr = false) {
@@ -655,14 +949,15 @@ function cancelKiroAuth() {
     clearTimeout(kiroAuth.timer);
     kiroAuth.timer = null;
   }
+  stopKiroClock();
   fetch("/api/kiro/cancel", { method: "POST" }).catch(() => {});
   hideKiroModal();
 }
 
-/** Закрытие крестиком — только спрятать UI, poll продолжается в фоне. */
+/** The X only hides the UI; polling keeps running in the background. */
 function closeKiroModal() {
   if (kiroAuth.active) {
-    toast("Вход продолжается в фоне — после AWS модели появятся сами");
+    toast(t("kiro.background"));
     hideKiroModal();
     return;
   }
@@ -670,17 +965,15 @@ function closeKiroModal() {
 }
 
 async function finishKiroSuccess(r) {
-  setKiroStatus("Подключено");
-  setKiroWait("done", "Готово", "Kiro подключён. Подтягиваю модели…");
-  toast("Kiro подключён");
+  setKiroStatus(t("kiro.codeConfirmed"));
+  setKiroStep("link");
+  setKiroWait("wait", t("kiro.codeConfirmed"), t("kiro.issuingKey"));
+  toast(t("kiro.connected"));
   kiroAuth.active = false;
   // AWS approved the device code, so the account is connected even if the status/quota
   // calls below fail. Without this the key step below would repaint the UI as logged out.
   updateAuthButtons(true);
-  if (els.btnKiroRetry) {
-    els.btnKiroRetry.disabled = false;
-    els.btnKiroRetry.textContent = "Готово";
-  }
+  setKiroRetryButton("done");
   try {
     if (kiroAuth.awsWin && !kiroAuth.awsWin.closed) kiroAuth.awsWin.close();
   } catch {
@@ -690,9 +983,13 @@ async function finishKiroSuccess(r) {
   if (r.keyIssued?.masked) {
     if (els.keyCurrent) els.keyCurrent.textContent = r.keyIssued.masked;
     if (els.apiKey) els.apiKey.placeholder = r.keyIssued.masked;
-    toast(r.keyIssued.reused ? `Ключ: ${r.keyIssued.masked}` : `Ключ выдан: ${r.keyIssued.masked}`);
+    toast(
+      r.keyIssued.reused
+        ? t("kiro.keyReused", { key: r.keyIssued.masked })
+        : t("kiro.keyIssued", { key: r.keyIssued.masked })
+    );
   } else if (r.keyIssued?.error) {
-    toast(`Kiro ок, но ключ: ${r.keyIssued.error}`, true);
+    toast(t("kiro.keyFailed", { error: r.keyIssued.error }), true);
     try {
       await generateKey();
     } catch {
@@ -706,8 +1003,12 @@ async function finishKiroSuccess(r) {
     }
   }
 
+  setKiroStep("models");
+  setKiroStatus(t("kiro.loadingModels"));
+  setKiroWait("wait", t("kiro.keyReady"), t("kiro.pullingModels"));
+
   setTab("models");
-  // До 25с: OmniRoute иногда отдаёт модели с задержкой после OAuth
+  // Up to 25s: OmniRoute sometimes serves the models a while after the OAuth handshake.
   let gotModels = Number(r.modelsCount || 0) > 0;
   for (let i = 0; i < 20; i++) {
     try {
@@ -728,17 +1029,26 @@ async function finishKiroSuccess(r) {
     await new Promise((res) => setTimeout(res, 1200));
   }
 
+  stopKiroClock(true);
   if (!gotModels) {
-    toast("Kiro вошёл, но модели ещё грузятся — нажми «Обновить»", true);
+    setKiroStep("models", "error");
+    setKiroWait("error", t("kiro.modelsLate"), t("kiro.modelsLateSub"));
+    toast(t("kiro.modelsLateToast"), true);
   } else if (!state.kiroConnected) {
-    // модели есть, статус догонит
+    // The models are here; the status call will catch up on its own.
     updateAuthButtons(true);
     await refreshStatus().catch(() => {});
   } else {
-    toast(`Модели: ${state.models.length}`);
+    toast(t("kiro.modelsCount", { n: state.models.length }));
   }
 
-  setTimeout(hideKiroModal, 500);
+  if (gotModels) {
+    setKiroStep("done");
+    setKiroStatus(t("kiro.done"));
+    setKiroWait("done", t("kiro.done"), t("kiro.readySub", { n: state.models.length }));
+  }
+
+  setTimeout(hideKiroModal, gotModels ? 900 : 2500);
 }
 
 async function pollKiroLoop() {
@@ -747,43 +1057,47 @@ async function pollKiroLoop() {
     const r = await fetch("/api/kiro/poll", { method: "POST" }).then((x) => x.json());
     if (!kiroAuth.active && !r.success) return;
     if (r.success) {
-      // даже если модалку закрыли — доводим успех
+      // Even with the modal closed, finish the flow so the key and models still land.
       kiroAuth.active = false;
       await finishKiroSuccess(r);
       return;
     }
     if (!kiroAuth.active) return;
     if (r.pending || r.error === "authorization_pending" || r.error === "slow_down") {
-      setKiroStatus(r.slowDown ? "AWS просит подождать…" : "Ждём подтверждение…");
+      kiroAuth.attempts += 1;
+      setKiroStep("code");
+      setKiroStatus(r.slowDown ? t("kiro.slowDown") : t("kiro.awaitingConfirm"));
       setKiroWait(
         "wait",
-        "Ждём вход в AWS…",
-        r.slowDown
-          ? "AWS просит чуть подождать — продолжаем проверку."
-          : "После «Request approved» не закрывай FreeClaude сразу — дождёмся моделей сами."
+        t("kiro.awaitingTitle"),
+        r.slowDown ? t("kiro.slowDownSub") : t("kiro.keepOpenSub")
       );
       const wait = r.slowDown ? Math.max(kiroAuth.intervalMs + 5000, 10000) : kiroAuth.intervalMs;
+      if (els.kiroPollSub) {
+        els.kiroPollSub.textContent = t("kiro.step.code.attempt", {
+          n: kiroAuth.attempts,
+          sec: Math.round(wait / 1000),
+        });
+      }
       kiroAuth.timer = setTimeout(pollKiroLoop, wait);
       return;
     }
-    const msg = r.errorDescription || r.error || "Ошибка авторизации";
+    const msg = r.errorDescription || r.error || t("kiro.authError");
     stopKiroPolling();
+    stopKiroClock(true);
+    setKiroStep("code", "error");
     setKiroStatus(msg, true);
-    setKiroWait("error", "Не удалось завершить вход", msg + " — нажми «Повторить».");
-    if (els.btnKiroRetry) {
-      els.btnKiroRetry.disabled = false;
-      els.btnKiroRetry.textContent = "Повторить";
-    }
+    setKiroWait("error", t("kiro.finishFailed"), t("kiro.finishFailedSub", { error: msg }));
+    setKiroRetryButton("retry");
   } catch (e) {
     if (!kiroAuth.active) return;
     const msg = String(e.message || e);
     stopKiroPolling();
+    stopKiroClock(true);
+    setKiroStep("code", "error");
     setKiroStatus(msg, true);
-    setKiroWait("error", "Ошибка связи", msg);
-    if (els.btnKiroRetry) {
-      els.btnKiroRetry.disabled = false;
-      els.btnKiroRetry.textContent = "Повторить";
-    }
+    setKiroWait("error", t("kiro.connError"), msg);
+    setKiroRetryButton("retry");
   }
 }
 
@@ -801,13 +1115,13 @@ function render() {
 
   if (!list.length) {
     if (state.limit.limited || state.limit.banned) {
-      els.grid.innerHTML = `<div class="empty limit-empty">Лимит Kiro · модели временно недоступны</div>`;
+      els.grid.innerHTML = `<div class="empty limit-empty">${esc(t("grid.limited"))}</div>`;
     } else if (!state.omniOnline) {
-      els.grid.innerHTML = `<div class="empty">OmniRoute offline — открой Настройки → Установить недостающее</div>`;
+      els.grid.innerHTML = `<div class="empty">${esc(t("grid.offline"))}</div>`;
     } else if (!state.models.length) {
-      els.grid.innerHTML = `<div class="empty">Нет моделей — нажми «Стек» или «Обновить»</div>`;
+      els.grid.innerHTML = `<div class="empty">${esc(t("grid.empty"))}</div>`;
     } else {
-      els.grid.innerHTML = `<div class="empty">Ничего не найдено</div>`;
+      els.grid.innerHTML = `<div class="empty">${esc(t("grid.noMatch"))}</div>`;
     }
     return;
   }
@@ -819,13 +1133,16 @@ function render() {
       const r = state.results[m.id];
       let meta;
       if (testing) {
-        meta = `<div class="probe"><span class="probe-bars"><i></i><i></i><i></i><i></i></span> проверка…</div>`;
+        meta = `<div class="probe"><span class="probe-bars"><i></i><i></i><i></i><i></i></span> ${esc(t("grid.probing"))}</div>`;
       } else if (state.limit.limited || state.limit.banned) {
-        meta = state.limit.banned ? "аккаунт заблокирован" : "лимит аккаунта";
+        meta = esc(state.limit.banned ? t("grid.banned") : t("grid.limitedShort"));
+      } else if (r && r.ok) {
+        meta = `${r.ms} ms · ${esc((r.reply || "OK").slice(0, 36))}`;
       } else if (r) {
-        meta = r.ok
-          ? `${r.ms} ms · ${esc((r.reply || "OK").slice(0, 36))}`
-          : `${r.status || "err"} · ${esc((r.error || "ошибка").slice(0, 64))}`;
+        // Plain reason on the card, the fix and the original English behind the tooltip.
+        const label = r.reason ? reasonTitle(r.reason) : (r.error || t("toast.error")).slice(0, 64);
+        const tip = r.reason ? [reasonHint(r.reason), r.reason.raw].filter(Boolean).join("\n\n") : r.error || "";
+        meta = `<span class="probe-err" title="${esc(tip)}">${r.status ? `${esc(r.status)} · ` : ""}${esc(label)}</span>`;
       } else {
         meta = "—";
       }
@@ -833,8 +1150,8 @@ function render() {
       const selected = hasSession && m.id === state.activeModel;
       const locked = !hasSession || state.limit.limited;
       const actionBtn = selected
-        ? `<button class="btn launch small" data-open="${esc(m.id)}" type="button" ${locked ? "disabled" : ""}>Открыть</button>`
-        : `<button class="btn okish small" data-connect="${esc(m.id)}" type="button" ${testing || locked ? "disabled" : ""}>Подключить</button>`;
+        ? `<button class="btn launch small" data-open="${esc(m.id)}" type="button" ${locked ? "disabled" : ""}>${esc(t("grid.open"))}</button>`
+        : `<button class="btn okish small" data-connect="${esc(m.id)}" type="button" ${testing || locked ? "disabled" : ""}>${esc(t("grid.connect"))}</button>`;
       return `<article class="card ${selected ? "selected" : ""} ${testing ? "testing" : ""} ${locked ? "limited" : ""}">
         <div class="card-top">
           <div style="display:flex;gap:10px;align-items:flex-start">
@@ -848,7 +1165,7 @@ function render() {
         </div>
         <div class="meta">${meta}</div>
         <div class="row">
-          <button class="btn ghost small" data-test="${esc(m.id)}" type="button" ${testing || locked ? "disabled" : ""}>Проверить</button>
+          <button class="btn ghost small" data-test="${esc(m.id)}" type="button" ${testing || locked ? "disabled" : ""}>${esc(t("grid.test"))}</button>
           ${actionBtn}
         </div>
       </article>`;
@@ -862,16 +1179,178 @@ async function loadSetup() {
   return setup;
 }
 
+function formatKb(bytes) {
+  const n = Number(bytes || 0);
+  if (!n) return "";
+  return t("common.kb", { n: Math.round(n / 1024) });
+}
+
+/** The checkbox only ever shows what the server reports, so it cannot drift out of sync. */
+function renderAxiom(s) {
+  state.lastAxiom = s;
+  const enabled = Boolean(s?.enabled);
+  const available = Boolean(s?.available);
+  if (els.axiomToggle) {
+    els.axiomToggle.checked = enabled;
+    els.axiomToggle.disabled = !available;
+  }
+  if (els.axiomBox) els.axiomBox.classList.toggle("on", enabled);
+  if (els.axiomState) els.axiomState.textContent = enabled ? t("axiom.on") : t("axiom.off");
+  if (els.axiomMeta) {
+    const size = formatKb(s?.bytes);
+    els.axiomMeta.textContent = available
+      ? `~/.claude/CLAUDE.md${size ? ` · ${size}` : ""}`
+      : t("axiom.noPrompt");
+  }
+}
+
+async function loadAxiom() {
+  try {
+    renderAxiom(await api("/api/axiom"));
+  } catch {
+    renderAxiom({ available: false, enabled: false });
+  }
+}
+
+async function onAxiomToggle() {
+  const wanted = els.axiomToggle.checked;
+  els.axiomToggle.disabled = true;
+  if (els.axiomState) els.axiomState.textContent = t("axiom.applying");
+  try {
+    const s = await api("/api/axiom", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: wanted }),
+    });
+    renderAxiom(s);
+    toast(s.enabled ? t("axiom.enabled") : t("axiom.disabled"));
+  } catch (e) {
+    toast(String(e.message || e), true);
+    await loadAxiom();
+  }
+}
+
 async function refreshStatus() {
   const s = await fetch("/api/status").then((r) => r.json());
   renderConn(s);
   return s;
 }
 
+const DOCTOR_ICON = { ok: "i-check", warn: "i-alert", error: "i-alert" };
+
+function doctorRow(severity, code, detail) {
+  const icon = DOCTOR_ICON[severity] || "i-alert";
+  const title = t(`doctor.${code}.title`);
+  const hint = t(`doctor.${code}.hint`);
+  return `<div class="doctor-item ${severity}">
+      <svg class="ic" aria-hidden="true"><use href="#${icon}"/></svg>
+      <div>
+        <div class="doctor-item-title">${esc(title)}</div>
+        <div class="doctor-item-hint">${esc(hint)}</div>
+        ${detail ? `<div class="doctor-item-detail">${esc(detail)}</div>` : ""}
+      </div>
+    </div>`;
+}
+
+function renderDoctor(report) {
+  if (!els.doctorResult) return;
+  state.lastDoctor = report;
+  els.doctorResult.classList.remove("hidden");
+
+  if (report.error) {
+    els.doctorResult.innerHTML = `<div class="doctor-item error">
+        <svg class="ic" aria-hidden="true"><use href="#i-alert"/></svg>
+        <div>
+          <div class="doctor-item-title">${esc(t("doctor.failed"))}</div>
+          <div class="doctor-item-detail">${esc(report.error)}</div>
+        </div>
+      </div>`;
+    return;
+  }
+
+  const parts = (report.fixed || []).map((code) => doctorRow("ok", code, null));
+  // Whatever survived the repair is on the user: a login or a decision we will not make.
+  parts.push(...(report.findings || []).map((f) => doctorRow(f.severity, f.code, f.detail)));
+
+  if (!parts.length) {
+    parts.push(`<div class="doctor-item ok">
+        <svg class="ic" aria-hidden="true"><use href="#i-check"/></svg>
+        <div><div class="doctor-item-title">${esc(t("doctor.ok"))}</div></div>
+      </div>`);
+  }
+  els.doctorResult.innerHTML = parts.join("");
+}
+
+async function runDoctorCheck() {
+  if (!els.btnDoctor) return;
+  const label = els.btnDoctor.querySelector("span");
+  const before = label ? label.textContent : "";
+  els.btnDoctor.disabled = true;
+  if (label) label.textContent = t("doctor.checking");
+  try {
+    const report = await api("/api/doctor", { method: "POST" });
+    renderDoctor(report);
+    if (report.fixed && report.fixed.length) {
+      loadSetup().catch(() => {});
+      loadQuota().catch(() => {});
+    }
+  } catch (e) {
+    renderDoctor({ error: String(e.message || e) });
+  } finally {
+    els.btnDoctor.disabled = false;
+    if (label) label.textContent = before || t("doctor.check");
+  }
+}
+
+function markActiveLanguage() {
+  if (!els.langPicker) return;
+  for (const btn of els.langPicker.querySelectorAll("[data-lang]")) {
+    const on = btn.dataset.lang === lang.code;
+    btn.classList.toggle("on", on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+}
+
+/**
+ * Repaints in place instead of reloading: a reload during a Kiro sign-in would drop the
+ * device code. Cached payloads are re-rendered first so nothing flashes back to a default,
+ * then the same calls run again to pick up the server-side wording.
+ */
+async function setLanguage(next) {
+  if (!lang.dict[next] || next === lang.code) return;
+  const previous = lang.code;
+  lang.code = next;
+  try {
+    await api("/api/lang", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lang: next }),
+    });
+  } catch (e) {
+    lang.code = previous;
+    toast(String(e.message || e), true);
+    return;
+  }
+
+  applyI18n();
+  markActiveLanguage();
+  if (state.lastSetup) renderSetup(state.lastSetup);
+  if (state.lastQuota) renderQuota(state.lastQuota);
+  if (state.lastAxiom) renderAxiom(state.lastAxiom);
+  if (state.lastDoctor) renderDoctor(state.lastDoctor);
+  render();
+  if (state.models.length) els.foot.textContent = t("models.count", { n: state.models.length });
+  toast(t("lang.switched"));
+
+  refreshStatus().catch(() => {});
+  loadSetup().catch(() => {});
+  loadQuota().catch(() => {});
+}
+
 async function bootstrap() {
   els.foot.textContent = "";
   updateAuthButtons(false);
-  // Status first — so F5 never sits on «Проверка…» while setup/quota crawl.
+  // Status first — so F5 never sits on "Checking…" while setup/quota crawl.
   try {
     await refreshStatus();
   } catch {
@@ -892,16 +1371,20 @@ async function loadModels() {
   await refreshStatus();
   const res = await fetch("/api/models");
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "Не удалось загрузить модели");
+  if (!res.ok) {
+    throw new Error(
+      data.reason ? `${reasonTitle(data.reason)}. ${reasonHint(data.reason)}` : data.error || t("toast.modelsLoadFailed")
+    );
+  }
   state.models = data.models || [];
   state.activeModel = data.activeModel || state.activeModel;
-  els.foot.textContent = `${state.models.length} моделей`;
+  els.foot.textContent = t("models.count", { n: state.models.length });
   render();
 }
 
 async function testModel(id) {
   if (!state.kiroConnected) {
-    toast("Сначала войди в Kiro", true);
+    toast(t("toast.needKiro"), true);
     return;
   }
   if (state.testing.has(id)) return;
@@ -919,14 +1402,15 @@ async function testModel(id) {
     }
     state.results[id] = r;
     save();
-    const err = String(r?.error || "");
-    if (!r.ok && /suspend|banned|locked your account|security precaution/i.test(err)) {
-      toast("Kiro заблокировал аккаунт при проверке", true);
-      await loadQuota().catch(() => {});
-    } else if (r.ok) {
+    const reason = r?.reason;
+    if (r.ok) {
       toast(`OK · ${id}`);
     } else {
-      toast(r.error || "Ошибка проверки", true);
+      toast(reason ? `${reasonTitle(reason)}. ${reasonHint(reason)}` : r.error || t("toast.testFailed"), true);
+      // A ban also changes the account state, so refresh it instead of leaving a stale banner.
+      if (reason && (reason.kind === "banned" || reason.kind === "quota")) {
+        await loadQuota().catch(() => {});
+      }
     }
   } catch (e) {
     state.results[id] = { ok: false, error: String(e.message || e) };
@@ -940,7 +1424,7 @@ async function testModel(id) {
 
 async function connectModel(id) {
   if (!state.kiroConnected) {
-    toast("Сначала войди в Kiro", true);
+    toast(t("toast.needKiro"), true);
     return;
   }
   try {
@@ -950,13 +1434,13 @@ async function connectModel(id) {
       body: JSON.stringify({ model: id }),
     });
     if (!r.ok) {
-      toast(r.error || "Ошибка", true);
+      toast(r.error || t("toast.error"), true);
       return;
     }
     state.activeModel = id;
     render();
     await refreshStatus();
-    toast(`Подключено: ${id}`);
+    toast(t("toast.connected", { id }));
   } catch (e) {
     toast(String(e.message || e), true);
   }
@@ -964,17 +1448,17 @@ async function connectModel(id) {
 
 async function launchClaude() {
   if (!state.kiroConnected) {
-    toast("Сначала войди в Kiro", true);
+    toast(t("toast.needKiro"), true);
     return;
   }
   if (!state.activeModel) {
-    toast("Сначала подключи модель", true);
+    toast(t("toast.needModel"), true);
     return;
   }
   [els.btnLaunch, els.btnLaunchBar].forEach((b) => b && (b.disabled = true));
   try {
     const r = await api("/api/launch", { method: "POST" });
-    if (!r.ok) toast(r.error || "Не удалось открыть Claude", true);
+    if (!r.ok) toast(r.error || t("toast.launchFailed"), true);
     else toast(`Claude: ${r.model}`);
   } catch (e) {
     toast(String(e.message || e), true);
@@ -984,14 +1468,14 @@ async function launchClaude() {
 }
 
 async function clearKey() {
-  if (!confirm("Удалить сохранённый API-ключ? Claude Code не запустится без ключа.")) return;
+  if (!confirm(t("toast.confirmClearKey"))) return;
   try {
     const r = await api("/api/key/clear", { method: "POST" });
     if (!r.ok) throw new Error(r.error || "clear failed");
     els.apiKey.value = "";
-    if (els.keyCurrent) els.keyCurrent.textContent = "нет ключа";
-    els.apiKey.placeholder = "или вставь sk-…";
-    toast("Ключ удалён");
+    if (els.keyCurrent) els.keyCurrent.textContent = t("key.none");
+    els.apiKey.placeholder = t("key.placeholder");
+    toast(t("toast.keyRemoved"));
     await loadSetup();
     await refreshStatus();
   } catch (e) {
@@ -1002,7 +1486,7 @@ async function clearKey() {
 async function saveKey() {
   const apiKey = els.apiKey.value.trim();
   if (!apiKey) {
-    toast("Вставь ключ", true);
+    toast(t("toast.keyPasted"), true);
     return;
   }
   const btn = document.getElementById("btnSaveKey");
@@ -1014,13 +1498,13 @@ async function saveKey() {
       body: JSON.stringify({ apiKey }),
     });
     if (!r.ok) {
-      toast(r.error || "Ошибка", true);
+      toast(r.error || t("toast.error"), true);
       return;
     }
     els.apiKey.value = "";
     els.apiKey.placeholder = r.masked;
     if (els.keyCurrent) els.keyCurrent.textContent = r.masked;
-    toast(`Ключ: ${r.masked}`);
+    toast(t("toast.keySaved", { key: r.masked }));
     await loadSetup();
     await refreshStatus();
     loadQuota().catch(() => {});
@@ -1033,19 +1517,19 @@ async function saveKey() {
 
 async function generateKey() {
   if (!state.kiroConnected) {
-    toast("Сначала войди в Kiro", true);
+    toast(t("toast.needKiro"), true);
     return;
   }
   els.btnGenKey.disabled = true;
   try {
     const r = await api("/api/key/generate", { method: "POST" });
     if (!r.ok) {
-      toast(r.error || "Не удалось создать ключ", true);
+      toast(r.error || t("toast.keyCreateFailed"), true);
       return;
     }
     if (els.keyCurrent) els.keyCurrent.textContent = r.masked;
     els.apiKey.placeholder = r.masked;
-    toast(`Новый ключ: ${r.masked}`);
+    toast(t("toast.keyNew", { key: r.masked }));
     if (r.key) {
       els.apiKey.value = "";
       els.apiKey.placeholder = r.masked;
@@ -1075,7 +1559,7 @@ async function installAll() {
       if (els.btnStopInstall) els.btnStopInstall.classList.add("hidden");
       const stopped = setup.install?.step === "stopped";
       toast(
-        stopped ? "Установка остановлена" : setup.install?.ok ? "Готово" : "Ошибка установки",
+        stopped ? t("toast.installStopped") : setup.install?.ok ? t("toast.installDone") : t("toast.installFailed"),
         !setup.install?.ok && !stopped
       );
       if (setup.install?.ok) {
@@ -1090,7 +1574,7 @@ async function stopInstall() {
   if (els.btnStopInstall) els.btnStopInstall.disabled = true;
   try {
     const r = await fetch("/api/setup/install/stop", { method: "POST" }).then((x) => x.json());
-    toast(r.stopped ? r.message || "Останавливаю…" : r.message || "Стоп");
+    toast(r.message || (r.stopped ? t("toast.stopping") : t("toast.stop")));
     await loadSetup();
   } catch (e) {
     toast(String(e.message || e), true);
@@ -1130,6 +1614,10 @@ els.search.addEventListener("input", () => {
 
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
+  if (els.pathModal && !els.pathModal.classList.contains("hidden")) {
+    hidePathModal();
+    return;
+  }
   if (els.kiroModal && !els.kiroModal.classList.contains("hidden")) closeKiroModal();
 });
 
@@ -1154,28 +1642,65 @@ document.getElementById("btnLaunchBar").addEventListener("click", launchClaude);
 document.getElementById("btnSaveKey").addEventListener("click", saveKey);
 document.getElementById("btnClearKey").addEventListener("click", clearKey);
 document.getElementById("btnGenKey").addEventListener("click", generateKey);
+if (els.axiomToggle) els.axiomToggle.addEventListener("change", onAxiomToggle);
+if (els.checkGrid) {
+  els.checkGrid.addEventListener("click", (e) => {
+    const gear = e.target.closest("[data-path-key]");
+    if (gear) openPathDialog(gear.dataset.pathKey);
+  });
+}
+if (els.pathModal) {
+  els.pathModal.addEventListener("click", (e) => {
+    // closest(), not matches(): a click can land on the <svg> inside the close button.
+    if (e.target.closest?.("[data-path-close]")) hidePathModal();
+  });
+}
+if (els.btnPathSave) els.btnPathSave.addEventListener("click", () => savePathValue(els.pathInput.value.trim()));
+if (els.btnPathReset) els.btnPathReset.addEventListener("click", () => savePathValue(""));
+if (els.pathInput) {
+  els.pathInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") savePathValue(els.pathInput.value.trim());
+  });
+}
 document.getElementById("btnOpenKiro").addEventListener("click", openKiroAuth);
 if (els.btnAwsSignOut) els.btnAwsSignOut.addEventListener("click", awsSignOut);
 if (els.kiroModal) {
   els.kiroModal.addEventListener("click", (e) => {
     if (!e.target) return;
-    if (e.target.matches("[data-kiro-cancel]")) {
+    // closest(), not matches(): a click can land on the <svg> inside the close button.
+    if (e.target.closest?.("[data-kiro-cancel]")) {
       cancelKiroAuth();
       return;
     }
-    if (e.target.matches("[data-kiro-close]")) closeKiroModal();
+    if (e.target.closest?.("[data-kiro-close]")) closeKiroModal();
   });
 }
+if (els.btnKiroCopy) els.btnKiroCopy.addEventListener("click", copyKiroCode);
 if (els.btnKiroOpenAws) {
   els.btnKiroOpenAws.addEventListener("click", async () => {
     if (!kiroAuth.verificationUriComplete) return;
     const ok = await openAwsWindow(kiroAuth.verificationUriComplete, { fresh: true });
-    if (!ok) toast("Не удалось открыть окно AWS", true);
+    if (!ok) {
+      toast(t("kiro.awsOpenFailed"), true);
+      return;
+    }
+    if (kiroAuth.active) {
+      setKiroStep("code");
+      setKiroStatus(t("kiro.awaitingConfirm"));
+      setKiroWait("wait", t("kiro.awaitingTitle"), t("kiro.awsReopened"));
+    }
   });
 }
 if (els.btnKiroRetry) {
   els.btnKiroRetry.addEventListener("click", () => {
-    if (els.btnKiroRetry.textContent === "Повторить") openKiroAuth();
+    if (els.btnKiroRetry.dataset.action === "retry") openKiroAuth();
+  });
+}
+if (els.btnDoctor) els.btnDoctor.addEventListener("click", runDoctorCheck);
+if (els.langPicker) {
+  els.langPicker.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-lang]");
+    if (btn) setLanguage(btn.dataset.lang);
   });
 }
 document.getElementById("btnInstallAll").addEventListener("click", installAll);
@@ -1204,7 +1729,7 @@ function showUpdateLock(telegram) {
     lock.classList.remove("hidden");
     lock.setAttribute("aria-hidden", "false");
   }
-  document.title = "FreeClaude · обновление";
+  document.title = t("update.docTitle");
 }
 
 async function ensureAccess() {
@@ -1216,7 +1741,7 @@ async function ensureAccess() {
     }
     return true;
   } catch {
-    // Pastebin/сеть тормозят — не блокируем UI на F5
+    // Pastebin or the network is slow — do not hold the UI hostage on F5.
     return true;
   }
 }
@@ -1229,6 +1754,8 @@ async function ensureAccess() {
   } catch {
     savedTab = "home";
   }
+  applyI18n();
+  markActiveLanguage();
   // Paint tab + status immediately, access check in parallel (was blocking whole UI).
   setTab(savedTab);
   syncLimitTimer();

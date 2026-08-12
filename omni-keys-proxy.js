@@ -95,6 +95,10 @@ module.exports = {
   getAccountLimitInfo: () => call("getAccountLimitInfo"),
   healKiroConnections: () => call("healKiroConnections"),
   hasKiroCredentials: () => call("hasKiroCredentials"),
+  diagnoseInstall: (apiKey) => call("diagnoseInstall", [apiKey || null]),
+  repairInstall: (apiKey, codes) => call("repairInstall", [apiKey || null, codes || null]),
   formatDuration: require("./format-duration"),
-  DB_PATH: path.join(process.env.USERPROFILE || "", ".omniroute", "storage.sqlite"),
+  get DB_PATH() {
+    return call("dbPath");
+  },
 };
