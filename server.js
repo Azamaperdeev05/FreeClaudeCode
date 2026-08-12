@@ -35,148 +35,21 @@ const TELEGRAM_URL = "https://t.me/loveaideep";
 const AWS_SIGNOUT_URL = "https://view.awsapps.com/start/#/signout";
 const AWS_PORTAL_URL = "https://view.awsapps.com/start";
 
-/** Cached resolved paths — GUI apps often miss user PATH that cmd.exe has. */
-let _nodePathCache = undefined;
-let _npmPathCache = undefined;
-let _winPathCache = null;
-let _winPathCachedAt = 0;
+/**
+ * Both values end up inside .bat files, where `&`, `|`, `>` and newlines start new commands.
+ * Allowlisting the characters we actually need is what keeps that from being executable.
+ */
+const MODEL_RE = /^[A-Za-z0-9._/:-]{1,120}$/;
+const TOKEN_RE = /^[A-Za-z0-9._-]{1,200}$/;
 
-function readWindowsUserMachinePath() {
-  if (_winPathCache && Date.now() - _winPathCachedAt < 60_000) return _winPathCache;
-  try {
-    const r = spawnSync(
-      "powershell.exe",
-      [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        "[Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')",
-      ],
-      { encoding: "utf8", windowsHide: true, timeout: 10000 }
-    );
-    _winPathCache = String(r.stdout || "").trim();
-  } catch {
-    _winPathCache = "";
-  }
-  _winPathCachedAt = Date.now();
-  return _winPathCache;
-}
-
-function enrichedPath() {
-  const parts = [
-    NODE_DIR_DEFAULT,
-    process.env.NVM_SYMLINK || "",
-    process.env.NVM_HOME || "",
-    NPM_BIN,
-    process.env.PATH || "",
-    readWindowsUserMachinePath(),
-  ].filter(Boolean);
-  return parts.join(";");
-}
-
-function whereOnPath(name) {
-  try {
-    const r = spawnSync("where.exe", [name], {
-      encoding: "utf8",
-      windowsHide: true,
-      timeout: 8000,
-      env: { ...process.env, PATH: enrichedPath() },
-    });
-    const lines = String(r.stdout || "")
-      .split(/\r?\n/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-    for (const line of lines) {
-      if (fs.existsSync(line)) return line;
-    }
-  } catch {
-    /* ignore */
-  }
-  return null;
-}
-
-function invalidateToolCache() {
-  _nodePathCache = undefined;
-  _npmPathCache = undefined;
-}
-
-function resolveNode() {
-  if (_nodePathCache !== undefined) {
-    if (_nodePathCache && fs.existsSync(_nodePathCache)) return _nodePathCache;
-    _nodePathCache = undefined;
-  }
-
-  const driveCandidates = [];
-  for (const letter of "CDEFGHIJKLMNOPQRSTUVWXYZ") {
-    for (const base of [`${letter}:\\Program Files`, `${letter}:\\Program Files (x86)`]) {
-      for (const name of ["nodejs", "Nodejs", "Node.js", "node"]) {
-        driveCandidates.push(path.join(base, name, "node.exe"));
-      }
-    }
-  }
-
-  const candidates = [
-    path.join(NODE_DIR_DEFAULT, "node.exe"),
-    process.env.NVM_SYMLINK ? path.join(process.env.NVM_SYMLINK, "node.exe") : null,
-    path.join(process.env.LOCALAPPDATA || "", "Programs", "node", "node.exe"),
-    path.join(os.homedir(), "scoop", "apps", "nodejs", "current", "node.exe"),
-    path.join(os.homedir(), "scoop", "apps", "nodejs-lts", "current", "node.exe"),
-    ...driveCandidates,
-    whereOnPath("node.exe"),
-    whereOnPath("node"),
-  ].filter(Boolean);
-
-  for (const c of candidates) {
-    try {
-      if (c && fs.existsSync(c)) {
-        _nodePathCache = c;
-        return c;
-      }
-    } catch {
-      /* ignore */
-    }
-  }
-  _nodePathCache = null;
-  return null;
-}
-
-function resolveNpm() {
-  if (_npmPathCache !== undefined) {
-    if (_npmPathCache && fs.existsSync(_npmPathCache)) return _npmPathCache;
-    _npmPathCache = undefined;
-  }
-  const node = resolveNode();
-  const besideNode = node ? path.join(path.dirname(node), "npm.cmd") : null;
-  // Prefer npm next to node.exe (E:\Program Files\Nodejs) over %APPDATA%\npm shims
-  const candidates = [
-    besideNode,
-    path.join(NODE_DIR_DEFAULT, "npm.cmd"),
-    process.env.NVM_SYMLINK ? path.join(process.env.NVM_SYMLINK, "npm.cmd") : null,
-    path.join(os.homedir(), "scoop", "apps", "nodejs", "current", "npm.cmd"),
-    path.join(os.homedir(), "scoop", "apps", "nodejs-lts", "current", "npm.cmd"),
-    whereOnPath("npm.cmd"),
-    whereOnPath("npm"),
-  ].filter(Boolean);
-
-  for (const c of candidates) {
-    try {
-      if (c && fs.existsSync(c)) {
-        _npmPathCache = c;
-        return c;
-      }
-    } catch {
-      /* ignore */
-    }
-  }
-  _npmPathCache = null;
-  return null;
-}
-
-function nodeDir() {
-  const n = resolveNode();
-  return n ? path.dirname(n) : NODE_DIR_DEFAULT;
-}
+const {
+  enrichedPath,
+  invalidateToolCache,
+  nodeDir,
+  resolveNode,
+  resolveNpm,
+  whereOnPath,
+} = require("./node-resolve");
 
 // Packaged EXE: do not auto-spawn a browser from inside pkg (causes 0xC0000005).
 // Use FreeClaude.cmd launcher, or open http://127.0.0.1:3847 manually.
@@ -705,10 +578,12 @@ function writeConfig(patch) {
 
 function readToken() {
   const cfg = readConfig();
-  if (cfg.apiKey) return cfg.apiKey;
+  const fromConfig = String(cfg.apiKey || "").trim();
+  if (fromConfig) return TOKEN_RE.test(fromConfig) ? fromConfig : "";
   try {
     const s = JSON.parse(fs.readFileSync(SETTINGS, "utf8"));
-    return s?.env?.ANTHROPIC_AUTH_TOKEN || "";
+    const fromSettings = String(s?.env?.ANTHROPIC_AUTH_TOKEN || "").trim();
+    return TOKEN_RE.test(fromSettings) ? fromSettings : "";
   } catch {
     return "";
   }
@@ -721,12 +596,15 @@ function maskToken(token) {
 }
 
 function readActiveModel() {
+  let raw = "";
   try {
     const s = JSON.parse(fs.readFileSync(SETTINGS, "utf8"));
-    return s?.model || s?.env?.ANTHROPIC_MODEL || "";
+    raw = s?.model || s?.env?.ANTHROPIC_MODEL || "";
   } catch {
-    return readConfig().model || "";
+    raw = readConfig().model || "";
   }
+  const value = String(raw).trim();
+  return MODEL_RE.test(value) ? value : "";
 }
 
 async function isOmniUp() {
@@ -742,63 +620,146 @@ let omniChild = null;
 let omniStopping = false;
 let omniOwned = false; // true if FreeClaude should kill :20128 on exit
 
+function killOmniRouteListeners() {
+  // Убиваем процесс, который мы запустили, со всем деревом
+  if (omniChild && omniChild.pid) {
+    try {
+      spawnSync("taskkill", ["/PID", String(omniChild.pid), "/T", "/F"], {
+        windowsHide: true,
+        stdio: "ignore",
+        timeout: 8000,
+      });
+    } catch {
+      try {
+        omniChild.kill();
+      } catch {
+        /* ignore */
+      }
+    }
+    omniChild = null;
+  }
+
+  // Всегда добиваем слушателей :20128 и node/omniroute serve — иначе сироты жрут CPU/лагает мышь
+  try {
+    // Matching a bare 'serve' here used to hit our own `node server.js` (and any
+    // unrelated `npm run serve`), so only 'omniroute' and the port itself qualify.
+    const ps = [
+      "$ErrorActionPreference='SilentlyContinue'",
+      `$self = ${process.pid}`,
+      "$pids = @()",
+      "Get-NetTCPConnection -LocalPort 20128 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { $pids += $_.OwningProcess }",
+      "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {",
+      "  ($_.Name -match '^(node|omniroute)') -and ($_.CommandLine -match 'omniroute')",
+      "} | ForEach-Object { $pids += $_.ProcessId }",
+      "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {",
+      "  $_.ExecutablePath -and ($_.ExecutablePath -match 'omniroute')",
+      "} | ForEach-Object { $pids += $_.ProcessId }",
+      "$pids = $pids | Where-Object { $_ -and $_ -gt 0 -and $_ -ne $self } | Select-Object -Unique",
+      "foreach ($procId in $pids) { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue }",
+    ].join("; ");
+    spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps], {
+      windowsHide: true,
+      stdio: "ignore",
+      timeout: 15000,
+    });
+  } catch {
+    /* ignore */
+  }
+
+  // Fallback без PowerShell NetTCP
+  try {
+    spawnSync(
+      process.env.ComSpec || "cmd.exe",
+      [
+        "/d",
+        "/c",
+        'for /f "tokens=5" %a in (\'netstat -ano ^| findstr :20128 ^| findstr LISTENING\') do taskkill /F /PID %a >nul 2>&1',
+      ],
+      { windowsHide: true, stdio: "ignore", timeout: 8000 }
+    );
+  } catch {
+    /* ignore */
+  }
+
+  // No taskkill fallback by image name here: COMMANDLINE is not a real taskkill
+  // filter, so it would degrade into killing every node.exe on the machine.
+  try {
+    spawnSync("taskkill", ["/F", "/IM", "omniroute.exe"], {
+      windowsHide: true,
+      stdio: "ignore",
+      timeout: 8000,
+    });
+  } catch {
+    /* ignore */
+  }
+}
+
 function stopOmniRoute() {
   if (omniStopping) return;
   omniStopping = true;
   try {
-    if (omniChild && omniChild.pid) {
-      try {
-        spawnSync("taskkill", ["/PID", String(omniChild.pid), "/T", "/F"], {
-          windowsHide: true,
-          stdio: "ignore",
-          timeout: 8000,
-        });
-      } catch {
-        try {
-          omniChild.kill();
-        } catch {
-          /* ignore */
-        }
-      }
-      omniChild = null;
-    }
-    // Всегда добиваем слушателей :20128 и node/omniroute serve — иначе сироты жрут CPU/лагает мышь
-    try {
-      const ps = [
-        "$ErrorActionPreference='SilentlyContinue'",
-        "$pids = @()",
-        "Get-NetTCPConnection -LocalPort 20128 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { $pids += $_.OwningProcess }",
-        "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {",
-        "  $_.Name -match '^(node|omniroute)' -and $_.CommandLine -match 'omniroute|20128|serve'",
-        "} | ForEach-Object { $pids += $_.ProcessId }",
-        "$pids = $pids | Where-Object { $_ -and $_ -gt 0 } | Select-Object -Unique",
-        "foreach ($procId in $pids) { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue }",
-      ].join("; ");
-      spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps], {
-        windowsHide: true,
-        stdio: "ignore",
-        timeout: 15000,
-      });
-    } catch {
-      /* ignore */
-    }
-    // fallback without PowerShell NetTCP
-    try {
-      spawnSync(
-        process.env.ComSpec || "cmd.exe",
-        [
-          "/d",
-          "/c",
-          'for /f "tokens=5" %a in (\'netstat -ano ^| findstr :20128 ^| findstr LISTENING\') do taskkill /F /PID %a >nul 2>&1',
-        ],
-        { windowsHide: true, stdio: "ignore", timeout: 8000 }
-      );
-    } catch {
-      /* ignore */
-    }
+    killOmniRouteListeners();
   } finally {
     omniOwned = false;
     omniStopping = false;
+  }
+}
+
+function killOrphanOmniRoute() {
+  // Перед стартом убиваем любой сиротский OmniRoute от прошлого запуска
+  killOmniRouteListeners();
+}
+
+function spawnOmniRouteWatcher() {
+  if (process.env.FREECLAUDE_NO_WATCHDOG === "1") return;
+  const parentPid = process.pid;
+  const scriptPath = path.join(os.tmpdir(), `freeclaude-omni-watcher-${parentPid}.ps1`);
+  const script = `
+$parentPid = ${parentPid}
+while ($true) {
+  try {
+    $null = Get-Process -Id $parentPid -ErrorAction Stop
+    Start-Sleep -Seconds 2
+  } catch {
+    break
+  }
+}
+$ErrorActionPreference = 'SilentlyContinue'
+Get-NetTCPConnection -LocalPort 20128 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { ($_.Name -match '^(node|omniroute)') -and ($_.CommandLine -match 'omniroute') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -match 'omniroute') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+try { Remove-Item -Path '${scriptPath.replace(/\\/g, "\\\\")}' -Force } catch {}
+`;
+  try {
+    fs.writeFileSync(scriptPath, script, "utf8");
+    const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    child.unref();
+    console.log(`OmniRoute watcher spawned (PID ${child.pid})`);
+  } catch (err) {
+    console.error("OmniRoute watcher spawn failed:", err && err.message ? err.message : err);
+  }
+
+  // Cleanup old watcher scripts (older than 2 days)
+  try {
+    const tmp = os.tmpdir();
+    for (const name of fs.readdirSync(tmp)) {
+      if (!name.startsWith("freeclaude-omni-watcher-")) continue;
+      const full = path.join(tmp, name);
+      try {
+        const st = fs.statSync(full);
+        if (Date.now() - st.mtimeMs > 2 * 24 * 60 * 60 * 1000) {
+          fs.rmSync(full, { force: true });
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+  } catch {
+    /* ignore */
   }
 }
 
@@ -940,7 +901,22 @@ async function ensureOmni(timeoutMs = 90000, opts = {}) {
   }
 }
 
+function assertSafeModel(model) {
+  const value = String(model || "").trim();
+  if (!MODEL_RE.test(value)) throw new Error("Недопустимое имя модели");
+  return value;
+}
+
+function assertSafeToken(token) {
+  const value = String(token || "").trim();
+  if (!TOKEN_RE.test(value)) throw new Error("Недопустимый формат API-ключа");
+  return value;
+}
+
 function writeBat(model, token) {
+  assertSafeModel(model);
+  assertSafeToken(token);
+
   const bat = `@echo off
 setlocal EnableExtensions
 set "PATH=${nodeDir()};%APPDATA%\\npm;%PATH%"
@@ -981,12 +957,13 @@ exit /b %EC%
 }
 
 function writeSettings(model, token) {
+  assertSafeModel(model);
+  assertSafeToken(token);
   const haiku = /haiku/i.test(model) ? model : "kiro/claude-haiku-4.5";
   const settings = {
     $schema: "https://json.schemastore.org/claude-code-settings.json",
     model,
     env: {
-      ANTHROPIC_BASE_URL: "http://localhost:20128",
       ANTHROPIC_AUTH_TOKEN: token,
       ANTHROPIC_MODEL: model,
       ANTHROPIC_SMALL_FAST_MODEL: haiku,
@@ -1217,7 +1194,6 @@ async function installAll() {
         track: true,
       });
       invalidateToolCache();
-      _winPathCache = null;
       nodeBin = resolveNode();
       npmBin = resolveNpm();
       pushLog("Node.js установлен");
@@ -1353,6 +1329,25 @@ async function omniFetch(pathname, options = {}) {
   return { ok: res.ok, status: res.status, text, json };
 }
 
+const ALLOWED_ORIGINS = new Set([`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`]);
+const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
+
+/**
+ * The UI is reachable at 127.0.0.1, so any page in the user's browser can reach it too.
+ * Without these checks a random site could POST here and drive the app (CSRF), and a
+ * hostname rebound to 127.0.0.1 could read responses (DNS rebinding).
+ */
+function isTrustedRequest(req) {
+  const host = String(req.headers.host || "").toLowerCase();
+  if (!ALLOWED_HOSTS.has(host)) return false;
+
+  const origin = req.headers.origin;
+  if (origin) return ALLOWED_ORIGINS.has(String(origin).toLowerCase());
+
+  // Browsers omit Origin on same-origin GET/HEAD but always send it on state-changing methods.
+  return req.method === "GET" || req.method === "HEAD";
+}
+
 function send(res, status, data, type = "application/json") {
   let body;
   if (Buffer.isBuffer(data)) body = data;
@@ -1448,6 +1443,10 @@ const server = http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url, `http://127.0.0.1:${PORT}`);
 
+    if (!isTrustedRequest(req)) {
+      return send(res, 403, { ok: false, error: "Запрос отклонён: недоверенный источник" });
+    }
+
     if (req.method === "GET" && u.pathname === "/api/access") {
       const force = u.searchParams.get("force") === "1";
       return send(res, 200, await checkAccess(force));
@@ -1483,6 +1482,7 @@ const server = http.createServer(async (req, res) => {
       const { apiKey } = await readBody(req);
       const key = String(apiKey || "").trim();
       if (!key) return send(res, 400, { ok: false, error: "Пустой ключ" });
+      if (!TOKEN_RE.test(key)) return send(res, 400, { ok: false, error: "Недопустимый формат API-ключа" });
       const model = readActiveModel() || "kiro/claude-sonnet-4.5";
       writeSettings(model, key);
       return send(res, 200, { ok: true, masked: maskToken(key), activeModel: model });
@@ -1512,6 +1512,46 @@ const server = http.createServer(async (req, res) => {
           reused: false,
           note: "Новый ключ OmniRoute создан. Лимиты идут от текущего аккаунта Kiro.",
         });
+      } catch (err) {
+        return send(res, 500, { ok: false, error: String(err.message || err) });
+      }
+    }
+
+    if (req.method === "POST" && u.pathname === "/api/key/clear") {
+      try {
+        // Удаляем ключ из config.json
+        const cfg = readConfig();
+        delete cfg.apiKey;
+        writeConfig(cfg);
+
+        // Удаляем ключ из Claude Code settings.json
+        try {
+          const settings = JSON.parse(fs.readFileSync(SETTINGS, "utf8"));
+          if (settings?.env) {
+            delete settings.env.ANTHROPIC_AUTH_TOKEN;
+            delete settings.env.ANTHROPIC_MODEL;
+            delete settings.env.ANTHROPIC_BASE_URL;
+          }
+          fs.writeFileSync(SETTINGS, JSON.stringify(settings, null, 2));
+        } catch {
+          /* ignore */
+        }
+
+        // Удаляем ключ из профиля active-freeclaude
+        try {
+          const profilePath = path.join(PROFILE_DIR, "settings.json");
+          const settings = JSON.parse(fs.readFileSync(profilePath, "utf8"));
+          if (settings?.env) {
+            delete settings.env.ANTHROPIC_AUTH_TOKEN;
+            delete settings.env.ANTHROPIC_MODEL;
+            delete settings.env.ANTHROPIC_BASE_URL;
+          }
+          fs.writeFileSync(profilePath, JSON.stringify(settings, null, 2));
+        } catch {
+          /* ignore */
+        }
+
+        return send(res, 200, { ok: true, cleared: true });
       } catch (err) {
         return send(res, 500, { ok: false, error: String(err.message || err) });
       }
@@ -1751,9 +1791,12 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && u.pathname === "/api/connect") {
       const { model } = await readBody(req);
       if (!model) return send(res, 400, { ok: false, error: "model required" });
+      if (!MODEL_RE.test(String(model).trim())) {
+        return send(res, 400, { ok: false, error: "Недопустимое имя модели" });
+      }
       const token = readToken();
       if (!token) return send(res, 400, { ok: false, error: "Сначала сохрани API-ключ OmniRoute в блоке Настройка" });
-      writeSettings(model, token);
+      writeSettings(String(model).trim(), token);
       return send(res, 200, { ok: true, model, activeModel: model });
     }
 
@@ -1761,6 +1804,7 @@ const server = http.createServer(async (req, res) => {
       const token = readToken();
       const model = readActiveModel() || "kiro/claude-sonnet-4.5";
       if (!token) return send(res, 400, { ok: false, error: "Нет API-ключа" });
+      if (!MODEL_RE.test(model)) return send(res, 400, { ok: false, error: "Недопустимое имя модели" });
       if (!(await isOmniUp())) {
         const up = await ensureOmni(60000);
         if (!up) return send(res, 503, { ok: false, error: "OmniRoute не запустился" });
@@ -1866,6 +1910,12 @@ async function main() {
     const existing = readToken();
     if (existing) writeConfig({ apiKey: existing, model: readActiveModel() || "kiro/claude-sonnet-4.5" });
   }
+
+  // Сначала убиваем сиротский OmniRoute от прошлого запуска — иначе он жрёт порт и CPU
+  killOrphanOmniRoute();
+
+  // Запускаем вотчдог, который прибьёт OmniRoute, если главное окно FreeClaude закрыто крестиком
+  spawnOmniRouteWatcher();
 
   // Already running → just open browser (no bat/cmd chain).
   try {

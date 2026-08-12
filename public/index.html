@@ -84,7 +84,7 @@
 
         <div class="toolbar">
           <div class="toolbar-row">
-            <input id="search" type="search" placeholder="Поиск моделей…" />
+            <input id="search" type="search" placeholder="Поиск моделей…" aria-label="Поиск моделей" />
           </div>
         </div>
 
@@ -126,6 +126,7 @@
           <div class="key-inputs">
             <input id="apiKey" type="password" placeholder="или вставь sk-…" autocomplete="off" />
             <button id="btnSaveKey" class="btn okish" type="button">Сохранить</button>
+            <button id="btnClearKey" class="btn ghost small" type="button">Удалить</button>
           </div>
           <div class="usage-row" id="usageRow">
             <div class="usage-item"><span>Использовано</span><strong id="usageUsed">—</strong></div>
@@ -163,9 +164,9 @@
     </div>
   </div>
 
-  <div id="toast" class="toast hidden"></div>
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
-  <div id="kiroModal" class="modal hidden" aria-hidden="true">
+  <div id="kiroModal" class="modal hidden" aria-hidden="true" aria-modal="true">
     <div class="modal-backdrop" data-kiro-close></div>
     <div class="modal-card" role="dialog" aria-labelledby="kiroModalTitle">
       <div class="modal-head">

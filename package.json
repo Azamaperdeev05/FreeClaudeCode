@@ -1,6 +1,6 @@
 {
   "name": "freeclaude-code",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Local Windows companion UI for Claude Code + OmniRoute + Kiro",
   "private": true,
   "bin": "server.js",
@@ -10,18 +10,26 @@
   },
   "author": "kolevans",
   "license": "MIT",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js && node --check omni-keys.js && node --check omni-keys-proxy.js && node --check node-resolve.js && node --check format-duration.js && node --check sqlite-bridge.js && node --check public/app.js",
+    "build": "powershell -ExecutionPolicy Bypass -File build-release.ps1"
+  },
+  "engines": {
+    "node": ">=22"
+  },
   "dependencies": {
-    "better-sqlite3": "^13.0.3"
+    "better-sqlite3": "13.0.3"
   },
   "pkg": {
     "targets": ["node22-win-x64"],
-    "outputPath": "dist-out",
     "assets": [
       "public/**/*"
     ],
     "scripts": [
-      "omni-keys.js",
-      "omni-keys-proxy.js"
+      "omni-keys-proxy.js",
+      "node-resolve.js",
+      "format-duration.js"
     ]
   }
 }

@@ -1,38 +1,73 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const formatDuration = require("./format-duration");
 
 const DB_PATH = path.join(process.env.USERPROFILE || "", ".omniroute", "storage.sqlite");
 
-function getDb(readonly = false) {
+// OmniRoute writes to this same file, so reads/writes can collide.
+const BUSY_TIMEOUT_MS = 10000;
+
+let _Database;
+
+function loadDatabaseCtor() {
+  if (_Database) return _Database;
+
+  // Our own copy is built against the Node that runs this file. OmniRoute's copy is
+  // compiled for whatever runtime OmniRoute uses, so it is only a last resort.
   const candidates = [
-    path.join(process.env.APPDATA || "", "npm", "node_modules", "omniroute", "node_modules", "better-sqlite3"),
     path.join(__dirname, "node_modules", "better-sqlite3"),
     path.join(path.dirname(process.execPath || ""), "node_modules", "better-sqlite3"),
     path.join(path.dirname(process.execPath || ""), "better-sqlite3"),
     "better-sqlite3",
+    path.join(process.env.APPDATA || "", "npm", "node_modules", "omniroute", "node_modules", "better-sqlite3"),
   ];
-  let Database = null;
+
   let lastErr = null;
   for (const mod of candidates) {
     try {
-      Database = require(mod);
-      break;
+      _Database = require(mod);
+      return _Database;
     } catch (err) {
       lastErr = err;
     }
   }
-  if (!Database) {
-    throw new Error(
-      "Не найден better-sqlite3 (установи OmniRoute). " + String(lastErr?.message || lastErr || "")
-    );
-  }
+  throw new Error(
+    "Не найден better-sqlite3 (установи OmniRoute). " + String(lastErr?.message || lastErr || "")
+  );
+}
+
+function getDb(readonly = false) {
+  const Database = loadDatabaseCtor();
   if (!fs.existsSync(DB_PATH)) throw new Error("OmniRoute DB не найдена. Сначала установи и запусти OmniRoute.");
-  return new Database(DB_PATH, { readonly });
+  return new Database(DB_PATH, { readonly, timeout: BUSY_TIMEOUT_MS });
 }
 
 function tableColumns(db, table) {
   return db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+}
+
+function buildSelectColumns(db, table, mapping) {
+  const cols = new Set(tableColumns(db, table));
+  const parts = [];
+  for (const [col, alias] of Object.entries(mapping)) {
+    if (cols.has(col)) parts.push(`${col} as ${alias}`);
+  }
+  return parts.join(", ") || "*";
+}
+
+function buildUpdateSet(db, table, assignments) {
+  const cols = new Set(tableColumns(db, table));
+  const parts = [];
+  const values = [];
+  for (const [col, value] of Object.entries(assignments)) {
+    if (cols.has(col)) {
+      parts.push(`${col} = ?`);
+      values.push(value);
+    }
+  }
+  if (!parts.length) throw new Error(`В таблице ${table} нет ни одной из ожидаемых колонок`);
+  return { set: parts.join(", "), values };
 }
 
 function machineIdFromExisting(db) {
@@ -45,108 +80,137 @@ function machineIdFromExisting(db) {
   return crypto.createHash("sha256").update(process.env.COMPUTERNAME || "pc").digest("hex").slice(0, 16);
 }
 
+function insertApiKey(db, name) {
+  const cols = new Set(tableColumns(db, "api_keys"));
+  if (!cols.has("key") || !cols.has("name") || !cols.has("id")) {
+    throw new Error("Таблица api_keys в OmniRoute повреждена или слишком старая");
+  }
+
+  const machine = machineIdFromExisting(db);
+  const key = `sk-${machine}-${crypto.randomBytes(3).toString("hex")}-${crypto.randomBytes(4).toString("hex")}`;
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const keyHash = crypto.createHash("sha256").update(key).digest("hex");
+  const keyPrefix = key.slice(0, Math.min(11, key.length));
+
+  // Только колонки, которые реально есть в этой версии OmniRoute
+  const row = {
+    id,
+    name,
+    key,
+    machine_id: machine,
+    allowed_models: "[]",
+    no_log: 0,
+    created_at: now,
+    key_prefix: keyPrefix,
+    scopes: JSON.stringify(["self:usage"]),
+    stream_default_mode: "legacy",
+    allowed_quotas: "[]",
+    disable_non_public_models: 0,
+    usage_limit_enabled: 0,
+    blocked_models: null,
+    auto_resolve: 0,
+    is_active: 1,
+    max_sessions: 0,
+    is_banned: 0,
+    key_hash: keyHash,
+    allow_usage_command: 0,
+    chaos_mode_enabled: 0,
+  };
+
+  const useCols = Object.keys(row).filter((c) => cols.has(c));
+  const placeholders = useCols.map(() => "?").join(", ");
+  db.prepare(`INSERT INTO api_keys (${useCols.join(", ")}) VALUES (${placeholders})`).run(
+    ...useCols.map((c) => row[c])
+  );
+
+  return {
+    id,
+    name,
+    key,
+    createdAt: now,
+    expiresAt: null,
+    masked: `${key.slice(0, 6)}…${key.slice(-4)}`,
+  };
+}
+
 function createApiKey(name = "freeclaude") {
   const db = getDb(false);
   try {
-    const cols = new Set(tableColumns(db, "api_keys"));
-    if (!cols.has("key") || !cols.has("name") || !cols.has("id")) {
-      throw new Error("Таблица api_keys в OmniRoute повреждена или слишком старая");
-    }
-
-    const machine = machineIdFromExisting(db);
-    const key = `sk-${machine}-${crypto.randomBytes(3).toString("hex")}-${crypto.randomBytes(4).toString("hex")}`;
-    const id = crypto.randomUUID();
-    const now = new Date().toISOString();
-    const keyHash = crypto.createHash("sha256").update(key).digest("hex");
-    const keyPrefix = key.slice(0, Math.min(11, key.length));
-
-    // Только колонки, которые реально есть в этой версии OmniRoute
-    const row = {
-      id,
-      name,
-      key,
-      machine_id: machine,
-      allowed_models: "[]",
-      no_log: 0,
-      created_at: now,
-      key_prefix: keyPrefix,
-      scopes: JSON.stringify(["self:usage"]),
-      stream_default_mode: "legacy",
-      allowed_quotas: "[]",
-      disable_non_public_models: 0,
-      usage_limit_enabled: 0,
-      blocked_models: null,
-      auto_resolve: 0,
-      is_active: 1,
-      max_sessions: 0,
-      is_banned: 0,
-      key_hash: keyHash,
-      allow_usage_command: 0,
-      chaos_mode_enabled: 0,
-    };
-
-    const useCols = Object.keys(row).filter((c) => cols.has(c));
-    const placeholders = useCols.map(() => "?").join(", ");
-    db.prepare(`INSERT INTO api_keys (${useCols.join(", ")}) VALUES (${placeholders})`).run(
-      ...useCols.map((c) => row[c])
-    );
-
-    return {
-      id,
-      name,
-      key,
-      createdAt: now,
-      expiresAt: null,
-      masked: `${key.slice(0, 6)}…${key.slice(-4)}`,
-    };
+    return insertApiKey(db, name);
   } finally {
     db.close();
   }
 }
 
-/** Есть активный ключ — вернём его; нет — создадим. */
+/**
+ * Есть активный ключ — вернём его; нет — создадим.
+ * Look-up and insert share one transaction so two quick calls cannot both decide
+ * that no key exists and each create one.
+ */
 function ensureApiKey(name = "freeclaude") {
+  const db = getDb(false);
   try {
-    const keys = listApiKeys().filter((k) => k.isActive && k.key);
-    const preferred =
-      keys.find((k) => /^freeclaude/i.test(String(k.name || ""))) ||
-      keys[0];
-    if (preferred?.key) {
-      return {
-        id: preferred.id,
-        name: preferred.name,
-        key: preferred.key,
-        createdAt: preferred.createdAt,
-        expiresAt: preferred.expiresAt || null,
-        masked: preferred.masked || `${preferred.key.slice(0, 6)}…${preferred.key.slice(-4)}`,
-        reused: true,
-      };
-    }
-  } catch {
-    /* create below */
+    return db.transaction(() => {
+      let existing = [];
+      try {
+        existing = readApiKeys(db).filter((k) => k.isActive && k.key);
+      } catch {
+        /* unreadable schema — fall through to insert */
+      }
+
+      const preferred = existing.find((k) => /^freeclaude/i.test(String(k.name || ""))) || existing[0];
+      if (preferred?.key) {
+        return {
+          id: preferred.id,
+          name: preferred.name,
+          key: preferred.key,
+          createdAt: preferred.createdAt,
+          expiresAt: preferred.expiresAt || null,
+          masked: preferred.masked || `${preferred.key.slice(0, 6)}…${preferred.key.slice(-4)}`,
+          reused: true,
+        };
+      }
+
+      return { ...insertApiKey(db, name), reused: false };
+    })();
+  } finally {
+    db.close();
   }
-  return { ...createApiKey(name), reused: false };
+}
+
+function readApiKeys(db) {
+  // OmniRoute schemas vary between versions, so only select columns that exist.
+  const cols = buildSelectColumns(db, "api_keys", {
+    id: "id",
+    name: "name",
+    key: "key",
+    created_at: "createdAt",
+    expires_at: "expiresAt",
+    last_used_at: "lastUsedAt",
+    is_active: "isActive",
+    revoked_at: "revokedAt",
+  });
+  const order = tableColumns(db, "api_keys").includes("created_at") ? " ORDER BY created_at DESC" : "";
+  return db
+    .prepare(`SELECT ${cols} FROM api_keys${order} LIMIT 50`)
+    .all()
+    .map((r) => ({
+      id: r.id,
+      name: r.name,
+      masked: r.key ? `${r.key.slice(0, 6)}…${r.key.slice(-4)}` : "",
+      key: r.key,
+      createdAt: r.createdAt,
+      expiresAt: r.expiresAt,
+      lastUsedAt: r.lastUsedAt,
+      isActive: Boolean(r.isActive) && !r.revokedAt,
+    }));
 }
 
 function listApiKeys() {
   const db = getDb(true);
   try {
-    return db
-      .prepare(
-        `SELECT id, name, key, created_at as createdAt, expires_at as expiresAt, last_used_at as lastUsedAt, is_active as isActive, revoked_at as revokedAt
-         FROM api_keys ORDER BY created_at DESC LIMIT 50`
-      )
-      .all()
-      .map((r) => ({
-        id: r.id,
-        name: r.name,
-        masked: r.key ? `${r.key.slice(0, 6)}…${r.key.slice(-4)}` : "",
-        key: r.key,
-        createdAt: r.createdAt,
-        expiresAt: r.expiresAt,
-        lastUsedAt: r.lastUsedAt,
-        isActive: Boolean(r.isActive) && !r.revokedAt,
-      }));
+    return readApiKeys(db);
   } finally {
     db.close();
   }
@@ -155,14 +219,24 @@ function listApiKeys() {
 function getKiroStatus() {
   const db = getDb(true);
   try {
+    const select = buildSelectColumns(db, "provider_connections", {
+      id: "id",
+      provider: "provider",
+      auth_type: "authType",
+      is_active: "isActive",
+      test_status: "testStatus",
+      expires_at: "expiresAt",
+      rate_limited_until: "rateLimitedUntil",
+      last_error: "lastError",
+      last_tested: "lastTested",
+      last_used_at: "lastUsedAt",
+      backoff_level: "backoffLevel",
+      quota_visible: "quotaVisible",
+      display_name: "displayName",
+      email: "email",
+    });
     const rows = db
-      .prepare(
-        `SELECT id, provider, auth_type as authType, is_active as isActive, test_status as testStatus,
-                expires_at as expiresAt, rate_limited_until as rateLimitedUntil, last_error as lastError,
-                last_tested as lastTested, last_used_at as lastUsedAt, backoff_level as backoffLevel,
-                quota_visible as quotaVisible, display_name as displayName, email
-         FROM provider_connections WHERE provider IN ('kiro','kr') ORDER BY priority ASC`
-      )
+      .prepare(`SELECT ${select} FROM provider_connections WHERE provider IN ('kiro','kr') ORDER BY priority ASC`)
       .all();
 
     const now = Date.now();
@@ -221,20 +295,6 @@ function getKiroStatus() {
   } finally {
     db.close();
   }
-}
-
-function formatDuration(ms) {
-  if (ms == null || Number.isNaN(ms)) return "—";
-  const s = Math.ceil(ms / 1000);
-  if (s < 60) return `${s}с`;
-  const m = Math.floor(s / 60);
-  const rs = s % 60;
-  if (m < 60) return `${m}м ${rs}с`;
-  const h = Math.floor(m / 60);
-  const rm = m % 60;
-  if (h < 48) return `${h}ч ${rm}м`;
-  const d = Math.floor(h / 24);
-  return `${d}д ${h % 24}ч`;
 }
 
 function getKeyUsage(apiKey) {
@@ -314,23 +374,25 @@ function getKeyUsage(apiKey) {
 function logoutKiro(connectionId = null) {
   const db = getDb(false);
   try {
+    const now = new Date().toISOString();
+    const baseAssignments = {
+      is_active: 0,
+      access_token: null,
+      refresh_token: null,
+      id_token: null,
+      api_key: null,
+      test_status: "disconnected",
+      last_error: "logged out from FreeClaude",
+      last_error_at: now,
+      rate_limited_until: null,
+      updated_at: now,
+    };
+
     if (connectionId) {
       const info = db.prepare(`SELECT id FROM provider_connections WHERE id = ? AND provider IN ('kiro','kr')`).get(connectionId);
       if (!info) throw new Error("Kiro-соединение не найдено");
-      db.prepare(
-        `UPDATE provider_connections
-         SET is_active = 0,
-             access_token = NULL,
-             refresh_token = NULL,
-             id_token = NULL,
-             api_key = NULL,
-             test_status = 'disconnected',
-             last_error = 'logged out from FreeClaude',
-             last_error_at = ?,
-             rate_limited_until = NULL,
-             updated_at = ?
-         WHERE id = ?`
-      ).run(new Date().toISOString(), new Date().toISOString(), connectionId);
+      const { set, values } = buildUpdateSet(db, "provider_connections", baseAssignments);
+      db.prepare(`UPDATE provider_connections SET ${set} WHERE id = ?`).run(...values, connectionId);
       return { ok: true, removed: 1, id: connectionId };
     }
 
@@ -343,22 +405,8 @@ function logoutKiro(connectionId = null) {
       )
       .get();
 
-    const result = db
-      .prepare(
-        `UPDATE provider_connections
-         SET is_active = 0,
-             access_token = NULL,
-             refresh_token = NULL,
-             id_token = NULL,
-             api_key = NULL,
-             test_status = 'disconnected',
-             last_error = 'logged out from FreeClaude',
-             last_error_at = ?,
-             rate_limited_until = NULL,
-             updated_at = ?
-         WHERE provider IN ('kiro','kr')`
-      )
-      .run(new Date().toISOString(), new Date().toISOString());
+    const { set, values } = buildUpdateSet(db, "provider_connections", baseAssignments);
+    const result = db.prepare(`UPDATE provider_connections SET ${set} WHERE provider IN ('kiro','kr')`).run(...values);
 
     return { ok: true, removed: Math.max(result.changes, Number(before?.c || 0)) };
   } finally {
@@ -422,33 +470,39 @@ function getAccountLimitInfo() {
 function healKiroConnections() {
   const db = getDb(false);
   try {
+    const cols = new Set(tableColumns(db, "provider_connections"));
     const now = new Date().toISOString();
+
+    const setParts = [];
+    if (cols.has("is_active")) setParts.push("is_active = 1");
+    if (cols.has("test_status")) {
+      setParts.push(
+        "test_status = CASE WHEN test_status IS NULL OR test_status = '' OR lower(test_status) IN ('disconnected','pending','unknown') THEN 'active' ELSE test_status END"
+      );
+    }
+    if (cols.has("last_error")) setParts.push("last_error = NULL");
+    if (cols.has("last_error_at")) setParts.push("last_error_at = NULL");
+    if (cols.has("updated_at")) setParts.push("updated_at = ?");
+
+    if (!setParts.length) return { ok: true, healed: 0 };
+
+    const whereParts = ["provider IN ('kiro','kr')"];
+    const tokenConds = [];
+    if (cols.has("access_token")) tokenConds.push("(access_token IS NOT NULL AND trim(access_token) != '')");
+    if (cols.has("refresh_token")) tokenConds.push("(refresh_token IS NOT NULL AND trim(refresh_token) != '')");
+    if (cols.has("api_key")) tokenConds.push("(api_key IS NOT NULL AND trim(api_key) != '')");
+    if (tokenConds.length) whereParts.push(`(${tokenConds.join(" OR ")})`);
+
+    const statusConds = [];
+    if (cols.has("is_active")) statusConds.push("(is_active = 0 OR is_active IS NULL)");
+    if (cols.has("test_status")) statusConds.push("lower(COALESCE(test_status, '')) IN ('disconnected', 'pending', 'unknown', '')");
+    if (statusConds.length) whereParts.push(`(${statusConds.join(" OR ")})`);
+    if (cols.has("test_status")) whereParts.push("lower(COALESCE(test_status, '')) NOT IN ('banned', 'expired', 'credits_exhausted')");
+
+    const values = cols.has("updated_at") ? [now] : [];
     const result = db
-      .prepare(
-        `UPDATE provider_connections
-         SET is_active = 1,
-             test_status = CASE
-               WHEN test_status IS NULL OR test_status = '' OR lower(test_status) IN ('disconnected','pending','unknown')
-               THEN 'active'
-               ELSE test_status
-             END,
-             last_error = NULL,
-             last_error_at = NULL,
-             updated_at = ?
-         WHERE provider IN ('kiro','kr')
-           AND (
-             (access_token IS NOT NULL AND trim(access_token) != '')
-             OR (refresh_token IS NOT NULL AND trim(refresh_token) != '')
-             OR (api_key IS NOT NULL AND trim(api_key) != '')
-           )
-           AND (
-             is_active = 0
-             OR is_active IS NULL
-             OR lower(COALESCE(test_status, '')) IN ('disconnected', 'pending', 'unknown', '')
-           )
-           AND lower(COALESCE(test_status, '')) NOT IN ('banned', 'expired', 'credits_exhausted')`
-      )
-      .run(now);
+      .prepare(`UPDATE provider_connections SET ${setParts.join(", ")} WHERE ${whereParts.join(" AND ")}`)
+      .run(...values);
     return { ok: true, healed: Number(result.changes || 0) };
   } finally {
     db.close();

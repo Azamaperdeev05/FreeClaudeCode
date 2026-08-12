@@ -1,6 +1,22 @@
+/** A corrupt value here used to throw during init and leave the user with a blank page. */
+function readStoredResults() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem("fc-results-v2") || "{}");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+  } catch {
+    /* fall through to a clean slate */
+  }
+  try {
+    localStorage.removeItem("fc-results-v2");
+  } catch {
+    /* storage may be unavailable entirely */
+  }
+  return {};
+}
+
 const state = {
   models: [],
-  results: JSON.parse(localStorage.getItem("fc-results-v2") || "{}"),
+  results: readStoredResults(),
   activeModel: "",
   query: "",
   testing: new Set(),
@@ -69,7 +85,32 @@ const els = {
 let toastTimer = null;
 
 function save() {
-  localStorage.setItem("fc-results-v2", JSON.stringify(state.results));
+  try {
+    localStorage.setItem("fc-results-v2", JSON.stringify(state.results));
+  } catch {
+    /* quota exceeded or storage disabled — results are only a cache */
+  }
+}
+
+/**
+ * The server can answer with a non-JSON error page, so parsing has to tolerate that
+ * instead of throwing a bare SyntaxError at the call site.
+ */
+async function api(url, options) {
+  const res = await fetch(url, options);
+  const text = await res.text();
+  let data = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = null;
+    }
+  }
+  if (!res.ok) {
+    throw new Error((data && (data.error || data.message)) || `Ошибка ${res.status}`);
+  }
+  return data ?? {};
 }
 
 function esc(s) {
@@ -220,16 +261,28 @@ function updateLimitTicker() {
   }
 }
 
-function ensureLimitTimer() {
-  if (state.limitTimer) return;
-  state.limitTimer = setInterval(updateLimitTicker, 1000);
+/** The 1s ticker only has work to do while a limit is counting down. */
+function syncLimitTimer() {
+  const needed = Boolean(state.limit.limited || state.limit.banned);
+  if (needed && !state.limitTimer) {
+    state.limitTimer = setInterval(updateLimitTicker, 1000);
+  } else if (!needed && state.limitTimer) {
+    clearInterval(state.limitTimer);
+    state.limitTimer = null;
+  }
 }
 
 function ensureQuotaPoll() {
-  if (state.quotaPoll) return;
+  if (state.quotaPoll || document.hidden) return;
   state.quotaPoll = setInterval(() => {
     loadQuota().catch(() => {});
   }, 20000);
+}
+
+function stopQuotaPoll() {
+  if (!state.quotaPoll) return;
+  clearInterval(state.quotaPoll);
+  state.quotaPoll = null;
 }
 
 function applyAccountLimit(account, serverNow) {
@@ -243,17 +296,22 @@ function applyAccountLimit(account, serverNow) {
   const MIN_UI_LIMIT_MS = 60 * 1000;
   const leftNow = resetAt ? Math.max(0, resetAt - Date.now()) : Number(a.resetInMs || 0);
   const seriousLimit = Boolean(a.limited) && leftNow >= MIN_UI_LIMIT_MS;
+
+  const before = `${state.limit.limited}|${state.limit.banned}`;
   state.limit = {
     limited: seriousLimit || Boolean(a.banned),
     banned: Boolean(a.banned),
     resetAt: seriousLimit ? resetAt : null,
     hint: a.banReason || a.resetInText || "",
   };
-  ensureLimitTimer();
+  const after = `${state.limit.limited}|${state.limit.banned}`;
+
+  syncLimitTimer();
   ensureQuotaPoll();
   updateLimitTicker();
   updateLaunchButtons();
-  render();
+  // Quota polls every 20s; rebuilding the whole grid each time drops scroll and focus.
+  if (before !== after) render();
 }
 
 function updateLaunchButtons() {
@@ -507,7 +565,8 @@ async function openKiroAuth() {
   } catch (e) {
     toast(String(e.message || e), true);
   } finally {
-    if (els.btnOpenKiro) els.btnOpenKiro.disabled = false;
+    // Re-enabling while polling is live would let a second click start an overlapping session.
+    if (els.btnOpenKiro) els.btnOpenKiro.disabled = kiroAuth.active;
   }
 }
 
@@ -532,6 +591,19 @@ const kiroAuth = {
   active: false,
   awsWin: null,
 };
+
+/**
+ * Polling has stopped for good. Clearing `active` too is what keeps the modal from
+ * claiming the login "continues in background" when nothing is running.
+ */
+function stopKiroPolling() {
+  kiroAuth.active = false;
+  if (kiroAuth.timer) {
+    clearTimeout(kiroAuth.timer);
+    kiroAuth.timer = null;
+  }
+  if (els.btnOpenKiro) els.btnOpenKiro.disabled = false;
+}
 
 function setKiroStatus(text, isErr = false) {
   if (!els.kiroStatus) return;
@@ -692,6 +764,7 @@ async function pollKiroLoop() {
       return;
     }
     const msg = r.errorDescription || r.error || "Ошибка авторизации";
+    stopKiroPolling();
     setKiroStatus(msg, true);
     setKiroWait("error", "Не удалось завершить вход", msg + " — нажми «Повторить».");
     if (els.btnKiroRetry) {
@@ -701,6 +774,7 @@ async function pollKiroLoop() {
   } catch (e) {
     if (!kiroAuth.active) return;
     const msg = String(e.message || e);
+    stopKiroPolling();
     setKiroStatus(msg, true);
     setKiroWait("error", "Ошибка связи", msg);
     if (els.btnKiroRetry) {
@@ -866,19 +940,23 @@ async function connectModel(id) {
     toast("Сначала войди в Kiro", true);
     return;
   }
-  const r = await fetch("/api/connect", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: id }),
-  }).then((x) => x.json());
-  if (!r.ok) {
-    toast(r.error || "Ошибка", true);
-    return;
+  try {
+    const r = await api("/api/connect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: id }),
+    });
+    if (!r.ok) {
+      toast(r.error || "Ошибка", true);
+      return;
+    }
+    state.activeModel = id;
+    render();
+    await refreshStatus();
+    toast(`Подключено: ${id}`);
+  } catch (e) {
+    toast(String(e.message || e), true);
   }
-  state.activeModel = id;
-  render();
-  await refreshStatus();
-  toast(`Подключено: ${id}`);
 }
 
 async function launchClaude() {
@@ -892,7 +970,7 @@ async function launchClaude() {
   }
   [els.btnLaunch, els.btnLaunchBar].forEach((b) => b && (b.disabled = true));
   try {
-    const r = await fetch("/api/launch", { method: "POST" }).then((x) => x.json());
+    const r = await api("/api/launch", { method: "POST" });
     if (!r.ok) toast(r.error || "Не удалось открыть Claude", true);
     else toast(`Claude: ${r.model}`);
   } catch (e) {
@@ -902,28 +980,52 @@ async function launchClaude() {
   }
 }
 
+async function clearKey() {
+  if (!confirm("Удалить сохранённый API-ключ? Claude Code не запустится без ключа.")) return;
+  try {
+    const r = await api("/api/key/clear", { method: "POST" });
+    if (!r.ok) throw new Error(r.error || "clear failed");
+    els.apiKey.value = "";
+    if (els.keyCurrent) els.keyCurrent.textContent = "нет ключа";
+    els.apiKey.placeholder = "или вставь sk-…";
+    toast("Ключ удалён");
+    await loadSetup();
+    await refreshStatus();
+  } catch (e) {
+    toast(String(e.message || e), true);
+  }
+}
+
 async function saveKey() {
   const apiKey = els.apiKey.value.trim();
   if (!apiKey) {
     toast("Вставь ключ", true);
     return;
   }
-  const r = await fetch("/api/key", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ apiKey }),
-  }).then((x) => x.json());
-  if (!r.ok) {
-    toast(r.error || "Ошибка", true);
-    return;
+  const btn = document.getElementById("btnSaveKey");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api("/api/key", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey }),
+    });
+    if (!r.ok) {
+      toast(r.error || "Ошибка", true);
+      return;
+    }
+    els.apiKey.value = "";
+    els.apiKey.placeholder = r.masked;
+    if (els.keyCurrent) els.keyCurrent.textContent = r.masked;
+    toast(`Ключ: ${r.masked}`);
+    await loadSetup();
+    await refreshStatus();
+    loadQuota().catch(() => {});
+  } catch (e) {
+    toast(String(e.message || e), true);
+  } finally {
+    if (btn) btn.disabled = false;
   }
-  els.apiKey.value = "";
-  els.apiKey.placeholder = r.masked;
-  if (els.keyCurrent) els.keyCurrent.textContent = r.masked;
-  toast(`Ключ: ${r.masked}`);
-  await loadSetup();
-  await refreshStatus();
-  loadQuota().catch(() => {});
 }
 
 async function generateKey() {
@@ -934,7 +1036,7 @@ async function generateKey() {
   }
   els.btnGenKey.disabled = true;
   try {
-    const r = await fetch("/api/key/generate", { method: "POST" }).then((x) => x.json());
+    const r = await api("/api/key/generate", { method: "POST" });
     if (!r.ok) {
       toast(r.error || "Не удалось создать ключ", true);
       return;
@@ -1014,9 +1116,29 @@ els.grid.addEventListener("click", (e) => {
   if (o) launchClaude();
 });
 
+let searchDebounce = null;
 els.search.addEventListener("input", () => {
-  state.query = els.search.value.trim().toLowerCase();
-  render();
+  // render() rebuilds the whole grid, so don't do it on every keystroke.
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(() => {
+    state.query = els.search.value.trim().toLowerCase();
+    render();
+  }, 150);
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (els.kiroModal && !els.kiroModal.classList.contains("hidden")) closeKiroModal();
+});
+
+// A hidden window does not need to keep polling OmniRoute every 20 seconds.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    stopQuotaPoll();
+  } else {
+    ensureQuotaPoll();
+    loadQuota().catch(() => {});
+  }
 });
 
 document.getElementById("btnRefresh").addEventListener("click", () => {
@@ -1028,6 +1150,7 @@ document.getElementById("btnRefresh").addEventListener("click", () => {
 document.getElementById("btnLaunch").addEventListener("click", launchClaude);
 document.getElementById("btnLaunchBar").addEventListener("click", launchClaude);
 document.getElementById("btnSaveKey").addEventListener("click", saveKey);
+document.getElementById("btnClearKey").addEventListener("click", clearKey);
 document.getElementById("btnGenKey").addEventListener("click", generateKey);
 document.getElementById("btnOpenKiro").addEventListener("click", openKiroAuth);
 if (els.btnAwsSignOut) els.btnAwsSignOut.addEventListener("click", awsSignOut);
@@ -1106,7 +1229,7 @@ async function ensureAccess() {
   }
   // Paint tab + status immediately, access check in parallel (was blocking whole UI).
   setTab(savedTab);
-  ensureLimitTimer();
+  syncLimitTimer();
   ensureQuotaPoll();
   const accessPromise = ensureAccess();
   try {
