@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="620" viewBox="0 0 1100 620" role="img" aria-label="FreeClaudeCode UI preview">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b0d12"/>
+      <stop offset="100%" stop-color="#15101f"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#7c6cff"/>
+      <stop offset="100%" stop-color="#9b8cff"/>
+    </linearGradient>
+  </defs>
+  <rect width="1100" height="620" rx="20" fill="url(#bg)"/>
+  <rect x="1" y="1" width="1098" height="618" rx="19" fill="none" stroke="#2a3140"/>
+
+  <!-- sidebar -->
+  <rect x="1" y="1" width="220" height="618" rx="19" fill="#0e1118"/>
+  <rect x="100" y="1" width="121" height="618" fill="#0e1118"/>
+  <text x="28" y="48" fill="#eef2f8" font-family="Segoe UI, Arial, sans-serif" font-size="18" font-weight="800">FreeClaude</text>
+  <rect x="18" y="78" width="184" height="40" rx="12" fill="rgba(124,108,255,.16)" stroke="rgba(124,108,255,.28)"/>
+  <text x="36" y="103" fill="#eef2f8" font-family="Segoe UI, Arial, sans-serif" font-size="14" font-weight="700">Home</text>
+  <text x="36" y="150" fill="#8b95a8" font-family="Segoe UI, Arial, sans-serif" font-size="14" font-weight="700">Models</text>
+  <text x="36" y="190" fill="#8b95a8" font-family="Segoe UI, Arial, sans-serif" font-size="14" font-weight="700">Settings</text>
+  <circle cx="34" cy="560" r="6" fill="#2fbf71"/>
+  <text x="50" y="565" fill="#8b95a8" font-family="Segoe UI, Arial, sans-serif" font-size="12">OmniRoute online</text>
+
+  <!-- main -->
+  <text x="280" y="120" fill="#9b8cff" font-family="Segoe UI, Arial, sans-serif" font-size="14" font-weight="700">FreeClaude</text>
+  <text x="280" y="180" fill="#eef2f8" font-family="Segoe UI, Arial, sans-serif" font-size="44" font-weight="800">Claude Code</text>
+  <text x="280" y="232" fill="#eef2f8" font-family="Segoe UI, Arial, sans-serif" font-size="44" font-weight="800">on your machine</text>
+  <text x="280" y="280" fill="#8b95a8" font-family="Segoe UI, Arial, sans-serif" font-size="18">A local companion that simplifies setup, auth, and launch.</text>
+
+  <rect x="280" y="320" width="150" height="46" rx="12" fill="url(#accent)"/>
+  <text x="312" y="349" fill="#fff" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700">Configure</text>
+  <rect x="448" y="320" width="130" height="46" rx="12" fill="transparent" stroke="#2a3140"/>
+  <text x="478" y="349" fill="#eef2f8" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700">Models</text>
+
+  <!-- cards -->
+  <g transform="translate(280,410)">
+    <rect width="220" height="120" rx="16" fill="#12151c" stroke="#2a3140"/>
+    <text x="22" y="40" fill="#eef2f8" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700">1. Install</text>
+    <text x="22" y="70" fill="#8b95a8" font-family="Segoe UI, Arial, sans-serif" font-size="13">Node � OmniRoute</text>
+    <text x="22" y="92" fill="#8b95a8" font-family="Segoe UI, Arial, sans-serif" font-size="13">Claude Code</text>
+  </g>
+  <g transform="translate(520,410)">
+    <rect width="220" height="120" rx="16" fill="#12151c" stroke="#2a3140"/>
+    <text x="22" y="40" fill="#eef2f8" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700">2. Sign in</text>
+    <text x="22" y="70" fill="#8b95a8" font-family="Segoe UI, Arial, sans-serif" font-size="13">Kiro / Builder ID</text>
+    <text x="22" y="92" fill="#8b95a8" font-family="Segoe UI, Arial, sans-serif" font-size="13">Auto API key</text>
+  </g>
+  <g transform="translate(760,410)">
+    <rect width="220" height="120" rx="16" fill="#12151c" stroke="#2a3140"/>
+    <text x="22" y="40" fill="#eef2f8" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700">3. Launch</text>
+    <text x="22" y="70" fill="#8b95a8" font-family="Segoe UI, Arial, sans-serif" font-size="13">Pick a model</text>
+    <text x="22" y="92" fill="#8b95a8" font-family="Segoe UI, Arial, sans-serif" font-size="13">Open Claude Code</text>
+  </g>
+</svg>

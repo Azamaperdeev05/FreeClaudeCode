@@ -11,11 +11,15 @@ try {
     process.exit(2);
   }
   let args = [];
-  try {
-    const raw = fs.readFileSync(0, "utf8");
-    if (raw && raw.trim()) args = JSON.parse(raw);
-  } catch {
-    args = [];
+  const raw = fs.readFileSync(0, "utf8");
+  if (raw && raw.trim()) {
+    try {
+      args = JSON.parse(raw);
+    } catch {
+      // Silently defaulting to [] would call the function with wrong arguments.
+      process.stdout.write(JSON.stringify({ error: "Некорректные аргументы для sqlite-bridge" }));
+      process.exit(1);
+    }
   }
   if (!Array.isArray(args)) args = [args];
   const result = keys[fn](...args);

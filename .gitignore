@@ -1,6 +1,7 @@
 # Dependencies & build artifacts
 node_modules/
 _release_stage/
+_release_stage*/
 dist-out/
 dist-release/
 *.exe
@@ -9,10 +10,14 @@ dist-release/
 
 # Local / personal data
 config.json
-*_auth.json
-*_poll.json
+freeclaude.bat
+launch-claude.cmd
 .env
 .env.*
+
+# Scratch / debug files. These have held live OAuth device codes,
+# client secrets and session cookies, so the pattern is deliberately broad.
+_*
 
 # OS & editor
 .DS_Store
