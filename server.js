@@ -72,6 +72,8 @@ const MODEL_RE = /^[A-Za-z0-9._/:-]{1,120}$/;
 const TOKEN_RE = /^[A-Za-z0-9._-]{1,200}$/;
 // Local drive path or UNC share, without the characters cmd.exe treats as syntax.
 const PATH_RE = /^(?:[A-Za-z]:\\|\\\\)[^"|&<>^%\r\n]{0,400}$/;
+// POSIX path for macOS/Linux: starts with /, no dangerous shell chars
+const POSIX_PATH_RE = /^\/[^"'&|;<>`$\r\n]{0,400}$/;
 
 const {
   configuredPaths,
@@ -858,17 +860,33 @@ function isOmniRouteInstalled() {
 }
 
 function claudeNativeBin() {
+  if (process.platform !== "win32") {
+    // macOS: claude is an ELF/Mach-O binary, not a PE
+    return claudeCmdPath();
+  }
   return path.join(npmBinDir(), "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe");
 }
 
 /** Real Claude Code binary — not the 500-byte postinstall stub. */
 function isClaudeCodeReady() {
   const cmd = claudeCmdPath();
+  if (!whichExists(cmd)) return false;
+
+  // On macOS/Linux: if the binary exists and is executable, it's ready
+  if (process.platform !== "win32") {
+    try {
+      const st = fs.statSync(cmd);
+      return st.isFile() && st.size > 1000;
+    } catch {
+      return false;
+    }
+  }
+
+  // On Windows: check for the real PE binary (not the tiny stub)
   const bin = claudeNativeBin();
-  if (!whichExists(cmd) || !whichExists(bin)) return false;
+  if (!whichExists(bin)) return false;
   try {
     const st = fs.statSync(bin);
-    // Stub is a tiny echo script; real win32 PE is multi‑MB.
     if (st.size < 100_000) return false;
     const fd = fs.openSync(bin, "r");
     const buf = Buffer.alloc(2);
@@ -879,6 +897,7 @@ function isClaudeCodeReady() {
     return false;
   }
 }
+
 
 function readConfig() {
   try {
@@ -1246,7 +1265,8 @@ function assertSafeToken(token) {
  */
 function assertSafePath(value, label) {
   const p = String(value || "").trim();
-  if (!PATH_RE.test(p)) throw new Error(st("srv.badPath", { label: label ? ` (${label})` : "", path: p }));
+  const re = process.platform === "win32" ? PATH_RE : POSIX_PATH_RE;
+  if (!re.test(p)) throw new Error(st("srv.badPath", { label: label ? ` (${label})` : "", path: p }));
   return p;
 }
 
