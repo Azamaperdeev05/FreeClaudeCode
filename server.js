@@ -85,6 +85,7 @@ const {
   resolveNpm,
   whereOnPath,
 } = require("./node-resolve");
+const { toBatPath, toBatPathSafe } = require("./bat-path");
 
 /**
  * OmniRoute and Claude Code are npm globals, so they normally sit in %APPDATA%\npm.
@@ -633,6 +634,12 @@ async function finalizeKiroAuth() {
     } catch {
       /* ignore */
     }
+    try {
+      // Drop the previous account's cooldown so a fresh Builder ID is not sticky-limited.
+      omniKeys.clearKiroCooldowns();
+    } catch {
+      /* ignore */
+    }
 
     // OmniRoute is writing the connection right now, so the cached HTTP answer is stale
     // by definition — ask it fresh on every lap.
@@ -644,6 +651,13 @@ async function finalizeKiroAuth() {
     if (connected && modelsCount > 0) break;
     await sleep(900);
   }
+
+  try {
+    omniKeys.clearKiroCooldowns();
+  } catch {
+    /* ignore */
+  }
+  await nudgeOmniCaches().catch(() => false);
 
   invalidateKiroHttpCache();
   const finalState = await resolveKiroConnected({ maxAgeMs: 0 });
@@ -1236,23 +1250,33 @@ function writeCmdFile(file, body) {
  * "path not found" on machines where the nested .bat path or claude.cmd lookup broke
  * (Cyrillic usernames, missing PATH after the omniroute shim, etc.).
  *
+ * Absolute paths with Cyrillic usernames break cmd.exe even with UTF-8 BOM — bake
+ * %APPDATA% / %USERPROFILE% / %ProgramFiles% instead (see bat-path.js).
+ *
  * Claude itself is checked at launch time, not here: writeSettings also runs when the
  * user only has a key and has not installed Claude Code yet.
  */
 function writeBat(model, token) {
   assertSafeModel(model);
   assertSafeToken(token);
-  const node = assertSafePath(nodeDir(), "Node.js");
-  const npm = assertSafePath(npmBinDir(), "npm");
-  const profile = assertSafePath(PROFILE_DIR, "Claude profile");
+  const nodeAbs = assertSafePath(nodeDir(), "Node.js");
+  const npmAbs = assertSafePath(npmBinDir(), "npm");
+  const profileAbs = assertSafePath(PROFILE_DIR, "Claude profile");
 
-  let claude = String(claudeCmdPath() || "").trim();
-  if (!PATH_RE.test(claude)) claude = "claude.cmd";
+  const node = toBatPathSafe(nodeAbs, "%ProgramFiles%\\nodejs");
+  const npm = toBatPathSafe(npmAbs, "%APPDATA%\\npm");
+  const profile = toBatPathSafe(profileAbs, "%USERPROFILE%\\.claude\\profiles\\active-freeclaude");
+
+  let claudeAbs = String(claudeCmdPath() || "").trim();
+  if (!PATH_RE.test(claudeAbs)) claudeAbs = "";
+  const claude = claudeAbs
+    ? toBatPathSafe(claudeAbs, "%APPDATA%\\npm\\claude.cmd")
+    : "%APPDATA%\\npm\\claude.cmd";
 
   const bat = `@echo off
 setlocal EnableExtensions
-chcp 65001 >nul
 set "PATH=${node};${npm};%PATH%"
+
 set "ANTHROPIC_BASE_URL=${OMNI}"
 set "ANTHROPIC_AUTH_TOKEN=${token}"
 set "ANTHROPIC_MODEL=${model}"
@@ -2381,6 +2405,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && u.pathname === "/api/kiro/aws-signout") {
       // Выход из AWS Access Portal в чистом окне (сессия Builder ID)
       omniKeys.logoutKiro(null);
+      invalidateKiroHttpCache();
+      await nudgeOmniCaches().catch(() => false);
       const opened = openAwsSignOut();
       return send(res, 200, {
         ok: true,
@@ -2394,6 +2420,8 @@ const server = http.createServer(async (req, res) => {
       try {
         const body = await readBody(req);
         const result = omniKeys.logoutKiro(body.id || null);
+        invalidateKiroHttpCache();
+        await nudgeOmniCaches().catch(() => false);
         return send(res, 200, { ok: true, ...result });
       } catch (err) {
         return send(res, 500, { ok: false, error: String(err.message || err) });
@@ -2586,15 +2614,16 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
-      // %APPDATA% keeps the call working even when the absolute path has Cyrillic letters
-      // that cmd.exe would otherwise misread from a UTF-8 .cmd without a BOM.
+      // %APPDATA% / %USERPROFILE% keep the call working when the absolute path has
+      // Cyrillic letters that cmd.exe would otherwise misread.
       const launcher = path.join(DATA_DIR, "launch-claude.cmd");
+      const nodeBat = toBatPathSafe(nodeDir(), "%ProgramFiles%\\nodejs");
+      const npmBat = toBatPathSafe(npmBinDir(), "%APPDATA%\\npm");
       writeCmdFile(
         launcher,
         `@echo off
 setlocal EnableExtensions
-chcp 65001 >nul
-set "PATH=${nodeDir()};${npmBinDir()};%PATH%"
+set "PATH=${nodeBat};${npmBat};%PATH%"
 title Claude Code - ${model}
 echo.
 echo  Model: ${model}

@@ -92,6 +92,7 @@ module.exports = {
   getKiroStatus: () => call("getKiroStatus"),
   getKeyUsage: (token) => call("getKeyUsage", [token]),
   logoutKiro: (id) => call("logoutKiro", [id || null]),
+  clearKiroCooldowns: () => call("clearKiroCooldowns"),
   getAccountLimitInfo: () => call("getAccountLimitInfo"),
   healKiroConnections: () => call("healKiroConnections"),
   hasKiroCredentials: () => call("hasKiroCredentials"),

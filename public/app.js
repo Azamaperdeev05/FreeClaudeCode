@@ -397,9 +397,11 @@ function applyAccountLimit(account, serverNow) {
     resetAt = Date.now() - skew + Number(a.resetInMs);
   }
   // A short cooldown (< 60s) is not an "account limit" — otherwise the banner flickers in use.
+  // Quota with no timer still counts: the user must switch accounts.
   const MIN_UI_LIMIT_MS = 60 * 1000;
   const leftNow = resetAt ? Math.max(0, resetAt - Date.now()) : Number(a.resetInMs || 0);
-  const seriousLimit = Boolean(a.limited) && leftNow >= MIN_UI_LIMIT_MS;
+  const hasTimer = Boolean(resetAt) || Number(a.resetInMs || 0) > 0;
+  const seriousLimit = Boolean(a.limited) && (!hasTimer || leftNow >= MIN_UI_LIMIT_MS);
 
   const before = `${state.limit.limited}|${state.limit.banned}`;
   state.limit = {
@@ -699,6 +701,9 @@ async function awsSignOut() {
       return;
     }
     updateAuthButtons(false);
+    state.limit = { limited: false, banned: false, resetAt: null, hint: "" };
+    syncLimitTimer();
+    updateLimitTicker();
     toast(t("kiro.awsSignOutOpened"));
     await loadQuota().catch(() => {});
   } catch (e) {
@@ -970,6 +975,10 @@ async function finishKiroSuccess(r) {
   setKiroWait("wait", t("kiro.codeConfirmed"), t("kiro.issuingKey"));
   toast(t("kiro.connected"));
   kiroAuth.active = false;
+  // Drop sticky limit/ban from the previous Builder ID before quota refreshes.
+  state.limit = { limited: false, banned: false, resetAt: null, hint: "" };
+  syncLimitTimer();
+  updateLimitTicker();
   // AWS approved the device code, so the account is connected even if the status/quota
   // calls below fail. Without this the key step below would repaint the UI as logged out.
   updateAuthButtons(true);

@@ -13,7 +13,9 @@ const { t } = require("./i18n");
 const RULES = [
   {
     kind: "quota",
-    match: (status, text) => /exhausted|quota (?:exceeded|exhausted)|out of (?:credits|quota)/i.test(text),
+    match: (status, text) =>
+      status === 402 ||
+      /exhausted|quota (?:exceeded|exhausted)|out of (?:credits|quota)|reached the limit/i.test(text),
   },
   {
     kind: "banned",

@@ -66,6 +66,8 @@ $sources = @(
   "server.js",
   "axiom.js",
   "axiom-default.md",
+  "account-limit.js",
+  "bat-path.js",
   "errors.js",
   "i18n.js",
   "kiro-state.js",
@@ -100,7 +102,7 @@ Invoke-Checked "pkg" { & $node $pkgBin . --targets node22-win-x64 --output (Join
 
 Write-Host "`n[4/4] copy runtime files..." -ForegroundColor Yellow
 Copy-Item (Join-Path $stage "public") (Join-Path $out "public") -Recurse -Force
-foreach ($f in @("omni-keys.js", "omni-doctor.js", "node-resolve.js", "format-duration.js", "sqlite-bridge.js", "axiom-default.md")) {
+foreach ($f in @("omni-keys.js", "omni-doctor.js", "account-limit.js", "bat-path.js", "node-resolve.js", "format-duration.js", "sqlite-bridge.js", "axiom-default.md")) {
   Copy-Item (Join-Path $root $f) (Join-Path $out $f) -Force
 }
 
@@ -154,6 +156,8 @@ $required = @(
   "sqlite-bridge.js",
   "omni-keys.js",
   "omni-doctor.js",
+  "account-limit.js",
+  "bat-path.js",
   "axiom-default.md",
   "node-resolve.js",
   "format-duration.js",
