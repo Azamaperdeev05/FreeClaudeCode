@@ -70,6 +70,8 @@ const state = {
   limitTimer: null,
   quotaPoll: null,
   setupPoll: null,
+  installStarting: false,
+  logsPoll: null,
   tab: "home",
   // Kept so a language switch can repaint server-sourced text without waiting on a refetch.
   lastSetup: null,
@@ -90,6 +92,10 @@ const els = {
   sideStatusText: document.getElementById("sideStatusText"),
   btnLaunch: document.getElementById("btnLaunch"),
   btnLaunchBar: document.getElementById("btnLaunchBar"),
+  btnContinueTop: document.getElementById("btnContinueTop"),
+  btnContinueChat: document.getElementById("btnContinueChat"),
+  btnChatsRefresh: document.getElementById("btnChatsRefresh"),
+  chatsList: document.getElementById("chatsList"),
   activeBar: document.getElementById("activeBar"),
   activeBarIcon: document.getElementById("activeBarIcon"),
   activeBarModel: document.getElementById("activeBarModel"),
@@ -105,6 +111,11 @@ const els = {
   accountMeta: document.getElementById("accountMeta"),
   installLogWrap: document.getElementById("installLogWrap"),
   installLog: document.getElementById("installLog"),
+  appLogView: document.getElementById("appLogView"),
+  logsMeta: document.getElementById("logsMeta"),
+  btnLogsRefresh: document.getElementById("btnLogsRefresh"),
+  btnLogsDownload: document.getElementById("btnLogsDownload"),
+  btnLogsClear: document.getElementById("btnLogsClear"),
   btnInstallAll: document.getElementById("btnInstallAll"),
   btnStopInstall: document.getElementById("btnStopInstall"),
   btnGenKey: document.getElementById("btnGenKey"),
@@ -169,7 +180,21 @@ async function api(url, options) {
     }
   }
   if (!res.ok) {
-    throw new Error((data && (data.error || data.message)) || t("toast.httpError", { status: res.status }));
+    const msg = (data && (data.error || data.message)) || t("toast.httpError", { status: res.status });
+    reportClientLog(
+      "error",
+      `${options?.method || "GET"} ${url} → ${res.status}: ${msg}${text && !data ? ` body=${text.slice(0, 400)}` : ""}`,
+      "api"
+    );
+    throw new Error(msg);
+  }
+  if (data && data.ok === false) {
+    const detail = data.error || data.reason?.title || data.message || "ok=false";
+    reportClientLog(
+      "warn",
+      `${options?.method || "GET"} ${url}: ${detail}${data.reason?.raw ? ` raw=${String(data.reason.raw).slice(0, 300)}` : ""}`,
+      "api"
+    );
   }
   return data ?? {};
 }
@@ -208,10 +233,102 @@ function toast(msg, isErr = false) {
   els.toast.classList.remove("hidden");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => els.toast.classList.add("hidden"), isErr ? 6500 : 3500);
+  if (isErr) reportClientLog("error", text, "toast");
+}
+
+function reportClientLog(level, message, source) {
+  const text = String(message == null ? "" : message).trim();
+  if (!text) return;
+  fetch("/api/logs/client", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ level, message: text, source: source || "ui" }),
+  }).catch(() => {});
+}
+
+function formatBytes(n) {
+  const v = Number(n) || 0;
+  if (v < 1024) return `${v} B`;
+  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
+  return `${(v / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+async function loadAppLogs({ quiet } = {}) {
+  try {
+    const data = await fetch("/api/logs").then((r) => r.json());
+    if (!data.ok) throw new Error(data.error || t("logs.loadFailed"));
+    const text = data.text || "";
+    if (els.logsMeta) {
+      els.logsMeta.textContent = t("logs.meta", {
+        lines: data.lines || 0,
+        size: formatBytes(data.bytes),
+        path: data.path || "",
+      });
+    }
+    if (els.appLogView) {
+      const nearBottom =
+        els.appLogView.scrollHeight - els.appLogView.scrollTop - els.appLogView.clientHeight < 80;
+      els.appLogView.textContent = text || t("logs.empty");
+      if (nearBottom || !els.appLogView.dataset.touched) {
+        els.appLogView.scrollTop = els.appLogView.scrollHeight;
+      }
+    }
+  } catch (err) {
+    if (!quiet) toast(err.message || t("logs.loadFailed"), true);
+    if (els.appLogView && !els.appLogView.textContent) {
+      els.appLogView.textContent = err.message || t("logs.loadFailed");
+    }
+  }
+}
+
+function ensureLogsPoll() {
+  if (state.logsPoll) return;
+  state.logsPoll = setInterval(() => {
+    if (state.tab !== "logs" || document.hidden) return;
+    loadAppLogs({ quiet: true }).catch(() => {});
+  }, 2000);
+}
+
+function stopLogsPoll() {
+  if (!state.logsPoll) return;
+  clearInterval(state.logsPoll);
+  state.logsPoll = null;
+}
+
+async function downloadAppLogs() {
+  try {
+    const res = await fetch("/api/logs/download");
+    if (!res.ok) throw new Error(t("logs.loadFailed"));
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    a.href = url;
+    a.download = `freeclaude-log-${stamp}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast(t("logs.downloaded"));
+  } catch (err) {
+    toast(err.message || t("logs.loadFailed"), true);
+  }
+}
+
+async function clearAppLogs() {
+  if (!window.confirm(t("logs.clearConfirm"))) return;
+  try {
+    const data = await fetch("/api/logs/clear", { method: "POST" }).then((r) => r.json());
+    if (!data.ok) throw new Error(data.error || t("logs.loadFailed"));
+    toast(t("logs.cleared"));
+    await loadAppLogs({ quiet: true });
+  } catch (err) {
+    toast(err.message || t("logs.loadFailed"), true);
+  }
 }
 
 function setTab(tab) {
-  const allowed = new Set(["home", "models", "setup"]);
+  const allowed = new Set(["home", "models", "chats", "setup", "logs"]);
   state.tab = allowed.has(tab) ? tab : "home";
   try {
     localStorage.setItem("fc-tab", state.tab);
@@ -221,15 +338,28 @@ function setTab(tab) {
   document.querySelectorAll(".nav-btn").forEach((b) => b.classList.toggle("on", b.dataset.tab === state.tab));
   const home = document.getElementById("tab-home");
   const models = document.getElementById("tab-models");
+  const chats = document.getElementById("tab-chats");
   const setup = document.getElementById("tab-setup");
+  const logs = document.getElementById("tab-logs");
   if (home) home.classList.toggle("hidden", state.tab !== "home");
   if (models) models.classList.toggle("hidden", state.tab !== "models");
+  if (chats) chats.classList.toggle("hidden", state.tab !== "chats");
   if (setup) setup.classList.toggle("hidden", state.tab !== "setup");
+  if (logs) logs.classList.toggle("hidden", state.tab !== "logs");
   if (els.foot) els.foot.classList.toggle("hidden", state.tab !== "models");
   if (state.tab === "setup") {
     loadSetup();
     loadQuota().catch(() => {});
     loadAxiom();
+  }
+  if (state.tab === "chats") {
+    loadChats().catch(() => {});
+  }
+  if (state.tab === "logs") {
+    ensureLogsPoll();
+    loadAppLogs().catch(() => {});
+  } else {
+    stopLogsPoll();
   }
 }
 
@@ -397,9 +527,11 @@ function applyAccountLimit(account, serverNow) {
     resetAt = Date.now() - skew + Number(a.resetInMs);
   }
   // A short cooldown (< 60s) is not an "account limit" — otherwise the banner flickers in use.
+  // Quota with no timer still counts: the user must switch accounts.
   const MIN_UI_LIMIT_MS = 60 * 1000;
   const leftNow = resetAt ? Math.max(0, resetAt - Date.now()) : Number(a.resetInMs || 0);
-  const seriousLimit = Boolean(a.limited) && leftNow >= MIN_UI_LIMIT_MS;
+  const hasTimer = Boolean(resetAt) || Number(a.resetInMs || 0) > 0;
+  const seriousLimit = Boolean(a.limited) && (!hasTimer || leftNow >= MIN_UI_LIMIT_MS);
 
   const before = `${state.limit.limited}|${state.limit.banned}`;
   state.limit = {
@@ -424,6 +556,8 @@ function updateLaunchButtons() {
   const ready = Boolean(state.activeModel) && hasSession && !limited;
   els.btnLaunch.disabled = !ready;
   if (els.btnLaunchBar) els.btnLaunchBar.disabled = !ready;
+  if (els.btnContinueChat) els.btnContinueChat.disabled = !ready;
+  if (els.btnContinueTop) els.btnContinueTop.disabled = !ready;
 
   // The active model is only shown with a live session (OmniRoute + Kiro).
   if (state.activeModel && hasSession) {
@@ -524,6 +658,10 @@ function renderConn(status) {
   else els.sideStatus.textContent = online ? "online" : "offline";
   setStatusIcon(els.sideStatus, online);
   if (status?.activeModel) state.activeModel = status.activeModel;
+  // /api/status already knows Kiro — keep the UI in sync without waiting for /api/quota.
+  if (typeof status?.kiro === "boolean") {
+    updateAuthButtons(status.kiro, { banned: Boolean(state.limit?.banned) && status.kiro });
+  }
   if (state.models.length) render();
   else updateLaunchButtons();
 }
@@ -690,17 +828,47 @@ function renderQuota(data) {
   }
 }
 
+function applySignedOutUi() {
+  updateAuthButtons(false);
+  state.limit = { limited: false, banned: false, resetAt: null, hint: "" };
+  state.models = [];
+  state.activeModel = null;
+  state.results = {};
+  syncLimitTimer();
+  updateLimitTicker();
+  if (els.keyCurrent) els.keyCurrent.textContent = t("key.none");
+  if (els.apiKey) {
+    els.apiKey.value = "";
+    els.apiKey.placeholder = t("key.placeholder");
+  }
+  if (els.accountState) {
+    els.accountState.className = "al-state off";
+    els.accountState.textContent = t("account.offline");
+  }
+  if (els.accountMeta) els.accountMeta.textContent = t("account.offlineHint");
+  if (els.foot) els.foot.textContent = t("grid.noAccount");
+  updateLaunchButtons();
+  render();
+}
+
 async function awsSignOut() {
   if (els.btnAwsSignOut) els.btnAwsSignOut.disabled = true;
   try {
+    reportClientLog("info", "AWS sign-out clicked", "auth");
     const r = await fetch("/api/kiro/aws-signout", { method: "POST" }).then((x) => x.json());
     if (!r.ok) {
       toast(r.error || t("kiro.awsSignOutFailed"), true);
       return;
     }
-    updateAuthButtons(false);
-    toast(t("kiro.awsSignOutOpened"));
+    applySignedOutUi();
+    reportClientLog(
+      "info",
+      `AWS sign-out ok removed=${r.purged?.removed ?? "?"} keyCleared=${r.keyCleared} keysRemoved=${r.keysRemoved ?? "?"} omniRestarted=${r.omniRestarted}`,
+      "auth"
+    );
+    toast(t("kiro.signedOut"));
     await loadQuota().catch(() => {});
+    await loadSetup().catch(() => {});
   } catch (e) {
     toast(String(e.message || e), true);
   } finally {
@@ -715,12 +883,21 @@ async function openKiroAuth() {
   // (for example after its panel password was reset), so say something meanwhile.
   setBtnLabel(els.btnOpenKiro, t("key.connecting"));
   try {
+    reportClientLog("info", "Kiro sign-in / switch account started", "auth");
     // Drop OmniRoute's old Kiro sessions before starting a new sign-in.
-    await fetch("/api/kiro/logout", {
+    const logoutRes = await fetch("/api/kiro/logout", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: "{}",
-    }).catch(() => {});
+    })
+      .then((x) => x.json())
+      .catch((e) => ({ ok: false, error: String(e.message || e) }));
+    if (logoutRes?.ok) applySignedOutUi();
+    reportClientLog(
+      logoutRes?.ok ? "info" : "warn",
+      `Kiro logout before auth: ok=${Boolean(logoutRes?.ok)} removed=${logoutRes?.removed ?? "?"} keyCleared=${logoutRes?.keyCleared} omniRestarted=${logoutRes?.omniRestarted} err=${logoutRes?.error || ""}`,
+      "auth"
+    );
 
     const r = await fetch("/api/kiro/start", {
       method: "POST",
@@ -733,38 +910,24 @@ async function openKiroAuth() {
     }
 
     kiroAuth.active = true;
+    kiroAuth.fetchFails = 0;
     kiroAuth.intervalMs = Math.max(3000, (Number(r.interval) || 5) * 1000);
     kiroAuth.verificationUriComplete = r.verificationUriComplete || "";
 
     if (els.kiroUserCode) els.kiroUserCode.textContent = r.userCode || "—";
-    setKiroStatus(t("kiro.openingAws"));
-    setKiroStep("open");
+    setKiroStatus(t("kiro.simpleTitle"));
+    setKiroStep("code");
     startKiroClock();
-    setKiroWait("wait", t("kiro.openingAws"), t("kiro.openingAwsSub"));
-    if (els.kiroPollSub) {
-      els.kiroPollSub.textContent = t("kiro.step.code.subEvery", {
-        sec: Math.round(kiroAuth.intervalMs / 1000),
-      });
-    }
+    setKiroWait("wait");
     setKiroRetryButton("waiting");
     if (els.kiroModal) {
       els.kiroModal.classList.remove("hidden");
       els.kiroModal.setAttribute("aria-hidden", "false");
     }
 
-    const ok = await openAwsWindow(kiroAuth.verificationUriComplete, { fresh: true });
-    if (ok) {
-      setKiroStep("code");
-      setKiroStatus(t("kiro.awaitingConfirm"));
-      setKiroWait("wait", t("kiro.awaitingTitle"), t("kiro.awaitingSub"));
-    } else {
-      // Polling still runs: the user can finish the login in any browser with the same code.
-      setKiroStep("open", "error");
-      setKiroStatus(t("kiro.awsNotOpened"), true);
-      setKiroWait("wait", t("kiro.awsNotOpenedTitle"), t("kiro.awsNotOpenedSub"));
-    }
+    await openAwsWindow(kiroAuth.verificationUriComplete, { fresh: true });
+    setKiroWait("wait");
 
-    toast(t("kiro.codeToast", { code: r.userCode || "—" }));
     if (kiroAuth.timer) clearTimeout(kiroAuth.timer);
     kiroAuth.timer = setTimeout(pollKiroLoop, 2500);
   } catch (e) {
@@ -793,11 +956,12 @@ async function loadQuota() {
 const kiroAuth = {
   timer: null,
   intervalMs: 5000,
-  verificationUriComplete: "",
+  attempts: 0,
+  fetchFails: 0,
   active: false,
+  verificationUriComplete: "",
   awsWin: null,
   startedAt: 0,
-  attempts: 0,
   tick: null,
 };
 
@@ -910,8 +1074,21 @@ function setKiroWait(state, title, sub) {
   els.kiroWait.classList.remove("done", "error");
   if (state === "done") els.kiroWait.classList.add("done");
   if (state === "error") els.kiroWait.classList.add("error");
-  if (els.kiroWaitTitle && title) els.kiroWaitTitle.textContent = title;
-  if (els.kiroWaitSub && sub) els.kiroWaitSub.textContent = sub;
+  // Simple modal: keep the short prompt while waiting; only swap text on error/done.
+  if (els.kiroWaitTitle) {
+    if (state === "error" && title) els.kiroWaitTitle.textContent = title;
+    else if (state === "done") els.kiroWaitTitle.textContent = t("kiro.simpleDone");
+    else els.kiroWaitTitle.textContent = t("kiro.simpleTitle");
+  }
+  if (els.kiroWaitSub) {
+    if (state === "error" && (sub || title)) {
+      els.kiroWaitSub.textContent = sub || title;
+      els.kiroWaitSub.classList.remove("hidden");
+    } else {
+      els.kiroWaitSub.textContent = "";
+      els.kiroWaitSub.classList.add("hidden");
+    }
+  }
 }
 
 /** Open AWS device auth in a clean browser profile (no saved Builder ID session). */
@@ -967,9 +1144,13 @@ function closeKiroModal() {
 async function finishKiroSuccess(r) {
   setKiroStatus(t("kiro.codeConfirmed"));
   setKiroStep("link");
-  setKiroWait("wait", t("kiro.codeConfirmed"), t("kiro.issuingKey"));
+  setKiroWait("wait");
   toast(t("kiro.connected"));
   kiroAuth.active = false;
+  // Drop sticky limit/ban from the previous Builder ID before quota refreshes.
+  state.limit = { limited: false, banned: false, resetAt: null, hint: "" };
+  syncLimitTimer();
+  updateLimitTicker();
   // AWS approved the device code, so the account is connected even if the status/quota
   // calls below fail. Without this the key step below would repaint the UI as logged out.
   updateAuthButtons(true);
@@ -1005,7 +1186,7 @@ async function finishKiroSuccess(r) {
 
   setKiroStep("models");
   setKiroStatus(t("kiro.loadingModels"));
-  setKiroWait("wait", t("kiro.keyReady"), t("kiro.pullingModels"));
+  setKiroWait("wait");
 
   setTab("models");
   // Up to 25s: OmniRoute sometimes serves the models a while after the OAuth handshake.
@@ -1045,7 +1226,7 @@ async function finishKiroSuccess(r) {
   if (gotModels) {
     setKiroStep("done");
     setKiroStatus(t("kiro.done"));
-    setKiroWait("done", t("kiro.done"), t("kiro.readySub", { n: state.models.length }));
+    setKiroWait("done");
   }
 
   setTimeout(hideKiroModal, gotModels ? 900 : 2500);
@@ -1055,11 +1236,24 @@ async function pollKiroLoop() {
   if (!kiroAuth.active) return;
   try {
     const r = await fetch("/api/kiro/poll", { method: "POST" }).then((x) => x.json());
+    kiroAuth.fetchFails = 0;
     if (!kiroAuth.active && !r.success) return;
     if (r.success) {
-      // Even with the modal closed, finish the flow so the key and models still land.
+      // Server already finalized the OAuth session. UI refresh must not undo a good login
+      // if FreeClaude briefly blips (Failed to fetch) right after AWS approval.
       kiroAuth.active = false;
-      await finishKiroSuccess(r);
+      try {
+        await finishKiroSuccess(r);
+      } catch (e) {
+        reportClientLog("warn", `finish after auth: ${e && e.message ? e.message : e}`, "auth");
+        updateAuthButtons(true);
+        setKiroWait("done");
+        toast(t("kiro.connected"));
+        setTimeout(hideKiroModal, 900);
+        loadQuota().catch(() => {});
+        loadModels().catch(() => {});
+        refreshStatus().catch(() => {});
+      }
       return;
     }
     if (!kiroAuth.active) return;
@@ -1067,11 +1261,7 @@ async function pollKiroLoop() {
       kiroAuth.attempts += 1;
       setKiroStep("code");
       setKiroStatus(r.slowDown ? t("kiro.slowDown") : t("kiro.awaitingConfirm"));
-      setKiroWait(
-        "wait",
-        t("kiro.awaitingTitle"),
-        r.slowDown ? t("kiro.slowDownSub") : t("kiro.keepOpenSub")
-      );
+      setKiroWait("wait");
       const wait = r.slowDown ? Math.max(kiroAuth.intervalMs + 5000, 10000) : kiroAuth.intervalMs;
       if (els.kiroPollSub) {
         els.kiroPollSub.textContent = t("kiro.step.code.attempt", {
@@ -1092,6 +1282,14 @@ async function pollKiroLoop() {
   } catch (e) {
     if (!kiroAuth.active) return;
     const msg = String(e.message || e);
+    // Brief FreeClaude/OmniRoute blips after AWS "Request approved" used to abort the whole login.
+    if (/failed to fetch|networkerror|load failed|network request failed/i.test(msg) && kiroAuth.fetchFails < 10) {
+      kiroAuth.fetchFails += 1;
+      setKiroWait("wait");
+      setKiroStatus(t("kiro.connRetry"));
+      kiroAuth.timer = setTimeout(pollKiroLoop, 2000);
+      return;
+    }
     stopKiroPolling();
     stopKiroClock(true);
     setKiroStep("code", "error");
@@ -1118,6 +1316,8 @@ function render() {
       els.grid.innerHTML = `<div class="empty limit-empty">${esc(t("grid.limited"))}</div>`;
     } else if (!state.omniOnline) {
       els.grid.innerHTML = `<div class="empty">${esc(t("grid.offline"))}</div>`;
+    } else if (!state.kiroConnected) {
+      els.grid.innerHTML = `<div class="empty">${esc(t("grid.noAccount"))}</div>`;
     } else if (!state.models.length) {
       els.grid.innerHTML = `<div class="empty">${esc(t("grid.empty"))}</div>`;
     } else {
@@ -1375,6 +1575,13 @@ async function bootstrap() {
 
 async function loadModels() {
   await refreshStatus();
+  if (!state.kiroConnected) {
+    state.models = [];
+    state.activeModel = null;
+    els.foot.textContent = t("grid.noAccount");
+    render();
+    return;
+  }
   const res = await fetch("/api/models");
   const data = await res.json();
   if (!res.ok) {
@@ -1452,7 +1659,10 @@ async function connectModel(id) {
   }
 }
 
-async function launchClaude() {
+async function launchClaude(opts = {}) {
+  const mode = opts.mode || "new";
+  const sessionId = opts.sessionId || "";
+  const cwd = opts.cwd || "";
   if (!state.kiroConnected) {
     toast(t("toast.needKiro"), true);
     return;
@@ -1461,15 +1671,74 @@ async function launchClaude() {
     toast(t("toast.needModel"), true);
     return;
   }
-  [els.btnLaunch, els.btnLaunchBar].forEach((b) => b && (b.disabled = true));
+  const buttons = [els.btnLaunch, els.btnLaunchBar, els.btnContinueChat, els.btnContinueTop].filter(Boolean);
+  buttons.forEach((b) => (b.disabled = true));
   try {
-    const r = await api("/api/launch", { method: "POST" });
+    const r = await api("/api/launch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode, sessionId, cwd }),
+    });
     if (!r.ok) toast(r.error || t("toast.launchFailed"), true);
+    else if (mode === "continue") toast(t("chats.continued"));
+    else if (mode === "resume") toast(t("chats.opened"));
     else toast(`Claude: ${r.model}`);
   } catch (e) {
     toast(String(e.message || e), true);
   } finally {
     updateLaunchButtons();
+  }
+}
+
+function shortAgo(iso) {
+  if (!iso) return "—";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return t("chats.ago", { time: `${s}s` });
+  const m = Math.floor(s / 60);
+  if (m < 60) return t("chats.ago", { time: `${m}m` });
+  const h = Math.floor(m / 60);
+  if (h < 48) return t("chats.ago", { time: `${h}h` });
+  const d = Math.floor(h / 24);
+  return t("chats.ago", { time: `${d}d` });
+}
+
+function shortPath(p) {
+  const s = String(p || "");
+  if (!s) return "";
+  if (s.length <= 48) return s;
+  return `…${s.slice(-46)}`;
+}
+
+function renderChats(sessions) {
+  if (!els.chatsList) return;
+  const list = Array.isArray(sessions) ? sessions : [];
+  if (!list.length) {
+    els.chatsList.innerHTML = `<div class="chats-empty">${esc(t("chats.empty"))}</div>`;
+    return;
+  }
+  els.chatsList.innerHTML = list
+    .map(
+      (s) => `<div class="chat-row" data-session-id="${esc(s.id)}" data-cwd="${esc(s.cwd || "")}">
+        <div class="chat-main">
+          <div class="chat-title" title="${esc(s.title || s.id)}">${esc(s.title || s.id)}</div>
+          <div class="chat-meta">${esc(shortAgo(s.mtime))}${s.cwd ? ` · ${esc(shortPath(s.cwd))}` : ""}</div>
+        </div>
+        <button type="button" class="btn ghost small" data-chat-resume>${esc(t("chats.resume"))}</button>
+      </div>`
+    )
+    .join("");
+}
+
+async function loadChats() {
+  if (!els.chatsList) return;
+  try {
+    const r = await fetch("/api/claude/sessions?limit=25").then((x) => x.json());
+    if (!r.ok) throw new Error(r.error || t("chats.loadFailed"));
+    renderChats(r.sessions || []);
+  } catch (e) {
+    els.chatsList.innerHTML = `<div class="chats-empty">${esc(e.message || t("chats.loadFailed"))}</div>`;
   }
 }
 
@@ -1549,31 +1818,48 @@ async function generateKey() {
 }
 
 async function installAll() {
+  // One poller only — repeated clicks used to spam “Installation failed” toasts.
+  if (state.setupPoll || state.installStarting) return;
+  state.installStarting = true;
   els.installLogWrap.classList.remove("hidden");
   els.btnInstallAll.disabled = true;
   if (els.btnStopInstall) {
     els.btnStopInstall.classList.remove("hidden");
     els.btnStopInstall.disabled = false;
   }
-  await fetch("/api/setup/install", { method: "POST" });
-  if (state.setupPoll) clearInterval(state.setupPoll);
+  try {
+    await fetch("/api/setup/install", { method: "POST" });
+  } catch (e) {
+    state.installStarting = false;
+    els.btnInstallAll.disabled = false;
+    toast(String(e.message || e), true);
+    return;
+  }
+  state.installStarting = false;
+  let finishedToast = false;
   state.setupPoll = setInterval(async () => {
-    const setup = await loadSetup();
-    if (!setup.install?.running) {
-      clearInterval(state.setupPoll);
-      state.setupPoll = null;
-      if (els.btnStopInstall) els.btnStopInstall.classList.add("hidden");
-      const stopped = setup.install?.step === "stopped";
-      toast(
-        stopped ? t("toast.installStopped") : setup.install?.ok ? t("toast.installDone") : t("toast.installFailed"),
-        !setup.install?.ok && !stopped
-      );
-      if (setup.install?.ok) {
-        await bootstrap();
-        try { await loadModels(); } catch {}
+    const setup = await loadSetup().catch(() => null);
+    if (!setup?.install) return;
+    if (setup.install.running) return;
+    clearInterval(state.setupPoll);
+    state.setupPoll = null;
+    if (els.btnStopInstall) els.btnStopInstall.classList.add("hidden");
+    if (finishedToast) return;
+    finishedToast = true;
+    const stopped = setup.install.step === "stopped";
+    toast(
+      stopped ? t("toast.installStopped") : setup.install.ok ? t("toast.installDone") : t("toast.installFailed"),
+      !setup.install.ok && !stopped
+    );
+    if (setup.install.ok) {
+      await bootstrap();
+      try {
+        await loadModels();
+      } catch {
+        /* ignore */
       }
     }
-  }, 400);
+  }, 600);
 }
 
 async function stopInstall() {
@@ -1643,8 +1929,28 @@ document.getElementById("btnRefresh").addEventListener("click", () => {
     els.grid.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
   });
 });
-document.getElementById("btnLaunch").addEventListener("click", launchClaude);
-document.getElementById("btnLaunchBar").addEventListener("click", launchClaude);
+document.getElementById("btnLaunch").addEventListener("click", () => launchClaude({ mode: "new" }));
+document.getElementById("btnLaunchBar").addEventListener("click", () => launchClaude({ mode: "new" }));
+if (els.btnContinueChat) {
+  els.btnContinueChat.addEventListener("click", () => launchClaude({ mode: "continue" }));
+}
+if (els.btnContinueTop) {
+  els.btnContinueTop.addEventListener("click", () => launchClaude({ mode: "continue" }));
+}
+if (els.btnChatsRefresh) els.btnChatsRefresh.addEventListener("click", () => loadChats());
+if (els.chatsList) {
+  els.chatsList.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-chat-resume]");
+    if (!btn) return;
+    const row = btn.closest("[data-session-id]");
+    if (!row) return;
+    launchClaude({
+      mode: "resume",
+      sessionId: row.dataset.sessionId,
+      cwd: row.dataset.cwd || "",
+    });
+  });
+}
 document.getElementById("btnSaveKey").addEventListener("click", saveKey);
 document.getElementById("btnClearKey").addEventListener("click", clearKey);
 document.getElementById("btnGenKey").addEventListener("click", generateKey);
@@ -1693,7 +1999,7 @@ if (els.btnKiroOpenAws) {
     if (kiroAuth.active) {
       setKiroStep("code");
       setKiroStatus(t("kiro.awaitingConfirm"));
-      setKiroWait("wait", t("kiro.awaitingTitle"), t("kiro.awsReopened"));
+      setKiroWait("wait");
     }
   });
 }
@@ -1711,6 +2017,14 @@ if (els.langPicker) {
 }
 document.getElementById("btnInstallAll").addEventListener("click", installAll);
 if (els.btnStopInstall) els.btnStopInstall.addEventListener("click", stopInstall);
+if (els.btnLogsRefresh) els.btnLogsRefresh.addEventListener("click", () => loadAppLogs());
+if (els.btnLogsDownload) els.btnLogsDownload.addEventListener("click", () => downloadAppLogs());
+if (els.btnLogsClear) els.btnLogsClear.addEventListener("click", () => clearAppLogs());
+if (els.appLogView) {
+  els.appLogView.addEventListener("scroll", () => {
+    els.appLogView.dataset.touched = "1";
+  });
+}
 if (els.btnLimitSwitch) {
   els.btnLimitSwitch.addEventListener("click", () => {
     setTab("setup");

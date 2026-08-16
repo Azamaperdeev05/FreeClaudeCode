@@ -4,6 +4,11 @@ const path = require("path");
 const crypto = require("crypto");
 const formatDuration = require("./format-duration");
 const omniDoctor = require("./omni-doctor");
+const {
+  MIN_LIMIT_MS,
+  classifyKiroConnection,
+  summarizeAccountLimits,
+} = require("./account-limit");
 
 // OmniRoute writes to this same file, so reads/writes can collide.
 const BUSY_TIMEOUT_MS = 10000;
@@ -281,49 +286,35 @@ function getKiroStatus() {
       .all();
 
     const now = Date.now();
-    const terminal = new Set(["banned", "expired", "credits_exhausted"]);
     return rows.map((r) => {
-      const isActive = r.isActive === true || r.isActive === 1 || r.isActive === "1";
-      const testStatus = String(r.testStatus || "").trim().toLowerCase();
-      const lastError = r.lastError ? String(r.lastError) : "";
-      const rateUntil = r.rateLimitedUntil ? new Date(r.rateLimitedUntil).getTime() : null;
+      const classified = classifyKiroConnection(
+        {
+          isActive: r.isActive,
+          testStatus: r.testStatus,
+          lastError: r.lastError,
+          rateLimitedUntil: r.rateLimitedUntil,
+        },
+        now
+      );
       const oauthUntil = r.expiresAt ? new Date(r.expiresAt).getTime() : null;
-      const cooling = rateUntil && rateUntil > now;
       const oauthLeftMs = oauthUntil ? Math.max(0, oauthUntil - now) : null;
-      const coolLeftMs = cooling ? Math.max(0, rateUntil - now) : 0;
-      const looksBanned =
-        terminal.has(testStatus) ||
-        /suspend|banned|locked your account|security precaution/i.test(lastError);
-
-      let state = "ok";
-      let detail = "активен";
-      if (looksBanned) {
-        state = "banned";
-        detail = lastError || testStatus || "аккаунт заблокирован";
-      } else if (!isActive || testStatus === "disconnected") {
-        state = "off";
-        detail = "выключен";
-      } else if (cooling) {
-        state = "limited";
-        detail = `лимит · ещё ${formatDuration(coolLeftMs)}`;
-      } else if (testStatus && testStatus !== "active") {
-        state = "warn";
-        detail = testStatus;
-      } else if (lastError) {
-        state = "warn";
-        detail = lastError.slice(0, 120);
+      let detail = classified.detail;
+      if (classified.state === "limited" && classified.coolLeftMs > 0) {
+        detail = `лимит · ещё ${formatDuration(classified.coolLeftMs)}`;
+      } else if (classified.state === "quota") {
+        detail = classified.lastError || "квота исчерпана";
       }
 
       return {
         id: r.id,
         provider: r.provider,
-        isActive,
-        state,
+        isActive: classified.isActive,
+        state: classified.state,
         detail,
         testStatus: r.testStatus,
-        cooling,
-        coolLeftMs,
-        coolLeftText: cooling ? formatDuration(coolLeftMs) : null,
+        cooling: classified.cooling,
+        coolLeftMs: classified.coolLeftMs,
+        coolLeftText: classified.cooling ? formatDuration(classified.coolLeftMs) : null,
         rateLimitedUntil: r.rateLimitedUntil || null,
         oauthExpiresAt: r.expiresAt,
         oauthLeftMs,
@@ -412,44 +403,85 @@ function getKeyUsage(apiKey) {
   }
 }
 
+function tableExists(db, name) {
+  try {
+    const row = db
+      .prepare(`SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1`)
+      .get(name);
+    return Boolean(row);
+  } catch {
+    return false;
+  }
+}
+
+/** OmniRoute rehydrates the in-memory quota cache from these rows after a restart. */
+function deleteQuotaSnapshotsForIds(db, ids) {
+  if (!ids.length || !tableExists(db, "quota_snapshots")) return 0;
+  const placeholders = ids.map(() => "?").join(",");
+  const result = db
+    .prepare(`DELETE FROM quota_snapshots WHERE connection_id IN (${placeholders})`)
+    .run(...ids);
+  return Number(result.changes || 0);
+}
+
+/**
+ * Drop Kiro sessions so a fresh Builder ID cannot inherit the previous account's
+ * 402/429 state. Soft-clear alone is not enough: OmniRoute keeps an in-memory
+ * quota cache and persists exhausted windows in `quota_snapshots`, keyed by
+ * connection id — OAuth often reuses that same row.
+ */
 function logoutKiro(connectionId = null) {
   const db = getDb(false);
   try {
-    const now = new Date().toISOString();
-    const baseAssignments = {
-      is_active: 0,
-      access_token: null,
-      refresh_token: null,
-      id_token: null,
-      api_key: null,
-      test_status: "disconnected",
-      last_error: "logged out from FreeClaude",
-      last_error_at: now,
-      rate_limited_until: null,
-      updated_at: now,
-    };
-
     if (connectionId) {
-      const info = db.prepare(`SELECT id FROM provider_connections WHERE id = ? AND provider IN ('kiro','kr')`).get(connectionId);
+      const info = db
+        .prepare(`SELECT id FROM provider_connections WHERE id = ? AND provider IN ('kiro','kr')`)
+        .get(connectionId);
       if (!info) throw new Error("Kiro-соединение не найдено");
-      const { set, values } = buildUpdateSet(db, "provider_connections", baseAssignments);
-      db.prepare(`UPDATE provider_connections SET ${set} WHERE id = ?`).run(...values, connectionId);
-      return { ok: true, removed: 1, id: connectionId };
+      const snapshots = deleteQuotaSnapshotsForIds(db, [connectionId]);
+      const del = db.prepare(`DELETE FROM provider_connections WHERE id = ?`).run(connectionId);
+      return {
+        ok: true,
+        removed: Number(del.changes || 0),
+        id: connectionId,
+        snapshotsCleared: snapshots,
+        purged: true,
+      };
     }
 
-    // Гасим ВСЕ Kiro/kr записи, не только is_active=1 (иначе «хвосты» остаются активными)
-    const before = db
-      .prepare(
-        `SELECT COUNT(*) as c FROM provider_connections
-         WHERE provider IN ('kiro','kr')
-           AND (is_active = 1 OR access_token IS NOT NULL OR refresh_token IS NOT NULL OR api_key IS NOT NULL)`
-      )
-      .get();
+    const rows = db
+      .prepare(`SELECT id FROM provider_connections WHERE provider IN ('kiro','kr')`)
+      .all();
+    const ids = rows.map((r) => r.id).filter(Boolean);
+    const snapshots = deleteQuotaSnapshotsForIds(db, ids);
+    const del = db.prepare(`DELETE FROM provider_connections WHERE provider IN ('kiro','kr')`).run();
+    return {
+      ok: true,
+      removed: Number(del.changes || 0),
+      snapshotsCleared: snapshots,
+      purged: true,
+    };
+  } finally {
+    db.close();
+  }
+}
 
-    const { set, values } = buildUpdateSet(db, "provider_connections", baseAssignments);
-    const result = db.prepare(`UPDATE provider_connections SET ${set} WHERE provider IN ('kiro','kr')`).run(...values);
-
-    return { ok: true, removed: Math.max(result.changes, Number(before?.c || 0)) };
+/** Remove FreeClaude-issued OmniRoute keys (and optionally the exact token in use). */
+function clearFreeClaudeKeys(currentKey = null) {
+  const db = getDb(false);
+  try {
+    const cols = new Set(tableColumns(db, "api_keys"));
+    if (!cols.has("key") && !cols.has("name")) return { ok: true, removed: 0 };
+    let removed = 0;
+    if (currentKey && cols.has("key")) {
+      removed += Number(db.prepare(`DELETE FROM api_keys WHERE key = ?`).run(String(currentKey)).changes || 0);
+    }
+    if (cols.has("name")) {
+      removed += Number(
+        db.prepare(`DELETE FROM api_keys WHERE lower(name) LIKE 'freeclaude%'`).run().changes || 0
+      );
+    }
+    return { ok: true, removed };
   } finally {
     db.close();
   }
@@ -457,33 +489,21 @@ function logoutKiro(connectionId = null) {
 
 function getAccountLimitInfo() {
   const kiro = getKiroStatus();
-  // Короткие cooldown (секунды) — нормальная пауза API, не «лимит аккаунта».
-  // Баннер/лок только если ждать реально долго.
-  const MIN_LIMIT_MS = 60 * 1000;
   try {
-    const active = kiro.filter((k) => k.isActive && k.state !== "off" && k.state !== "banned");
-    const banned = kiro.find((k) => k.state === "banned");
-    const limited = kiro.find(
-      (k) => k.isActive && (k.cooling || k.state === "limited") && Number(k.coolLeftMs || 0) >= MIN_LIMIT_MS
-    );
-    const banReason = banned?.lastError || banned?.detail || null;
-
-    let resetAt = null;
-    if (limited?.rateLimitedUntil) {
-      const t = new Date(limited.rateLimitedUntil).getTime();
-      if (!Number.isNaN(t)) resetAt = t;
-    }
-    const resetInMs = resetAt ? Math.max(0, resetAt - Date.now()) : limited?.coolLeftMs || 0;
-
+    const summary = summarizeAccountLimits(kiro, { minLimitMs: MIN_LIMIT_MS });
+    const resetInMs = Number(summary.resetInMs || 0);
     return {
       kiro,
-      connected: active.length > 0,
-      banned: Boolean(banned),
-      banReason,
-      limited: Boolean(limited),
-      resetAt,
+      connected: Boolean(summary.connected),
+      banned: Boolean(summary.banned),
+      banReason: summary.banReason,
+      limited: Boolean(summary.limited),
+      resetAt: summary.resetAt,
       resetInMs,
-      resetInText: resetInMs > 0 ? formatDuration(resetInMs) : limited?.coolLeftText || null,
+      resetInText:
+        resetInMs > 0
+          ? formatDuration(resetInMs)
+          : summary.limitedRow?.coolLeftText || null,
       recent429: 0,
       last429At: null,
     };
@@ -501,6 +521,66 @@ function getAccountLimitInfo() {
       last429At: null,
       error: String(err.message || err),
     };
+  }
+}
+
+/**
+ * After a fresh Builder ID login the previous account's cooldown often sticks on
+ * the same OmniRoute row (or in memory). Clear soft limits on live connections so
+ * the UI and router treat the new session as clean. Real AWS bans are left alone.
+ */
+function clearKiroCooldowns() {
+  const db = getDb(false);
+  try {
+    const cols = new Set(tableColumns(db, "provider_connections"));
+    const now = new Date().toISOString();
+    const activeIds = db
+      .prepare(
+        `SELECT id FROM provider_connections
+         WHERE provider IN ('kiro','kr')
+           AND (is_active = 1 OR is_active IS NULL)`
+      )
+      .all()
+      .map((r) => r.id)
+      .filter(Boolean);
+    const snapshotsCleared = deleteQuotaSnapshotsForIds(db, activeIds);
+
+    const setParts = [];
+    if (cols.has("rate_limited_until")) setParts.push("rate_limited_until = NULL");
+    if (cols.has("backoff_level")) setParts.push("backoff_level = 0");
+    if (cols.has("last_error")) setParts.push("last_error = NULL");
+    if (cols.has("last_error_at")) setParts.push("last_error_at = NULL");
+    if (cols.has("test_status")) {
+      setParts.push(
+        `test_status = CASE
+           WHEN lower(COALESCE(test_status, '')) IN ('rate_limited','credits_exhausted','error','limited')
+             THEN 'active'
+           ELSE test_status
+         END`
+      );
+    }
+    if (cols.has("updated_at")) setParts.push("updated_at = ?");
+    if (!setParts.length) {
+      return { ok: true, cleared: 0, snapshotsCleared };
+    }
+
+    const where = ["provider IN ('kiro','kr')"];
+    if (cols.has("is_active")) where.push("is_active = 1");
+    if (cols.has("test_status")) {
+      where.push("lower(COALESCE(test_status, '')) NOT IN ('banned')");
+    }
+
+    const values = cols.has("updated_at") ? [now] : [];
+    const result = db
+      .prepare(`UPDATE provider_connections SET ${setParts.join(", ")} WHERE ${where.join(" AND ")}`)
+      .run(...values);
+    return {
+      ok: true,
+      cleared: Number(result.changes || 0),
+      snapshotsCleared,
+    };
+  } finally {
+    db.close();
   }
 }
 
@@ -597,6 +677,8 @@ module.exports = {
   getKiroStatus,
   getKeyUsage,
   logoutKiro,
+  clearFreeClaudeKeys,
+  clearKiroCooldowns,
   getAccountLimitInfo,
   healKiroConnections,
   hasKiroCredentials,

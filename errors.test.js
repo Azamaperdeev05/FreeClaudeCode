@@ -14,6 +14,7 @@ function check(name, fn) {
 
 const cases = [
   // The exact message a user reported from the model probe.
+  [402, "API Error: 402 [402]: You have reached the limit", "quota"],
   [429, "[kiro/claude-sonnet-4.5] All kiro accounts have exhausted their quota", "quota"],
   [429, "Rate limit reached, slow down", "rate"],
   [403, "Your account has been suspended as a security precaution", "banned"],

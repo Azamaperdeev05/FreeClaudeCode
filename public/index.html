@@ -84,7 +84,9 @@
       <nav class="nav">
         <button class="nav-btn on" data-tab="home" type="button"><svg class="ic" aria-hidden="true"><use href="#i-home"/></svg><span data-i18n="nav.home">Home</span></button>
         <button class="nav-btn" data-tab="models" type="button"><svg class="ic" aria-hidden="true"><use href="#i-chip"/></svg><span data-i18n="nav.models">Models</span></button>
+        <button class="nav-btn" data-tab="chats" type="button"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg><span data-i18n="nav.chats">Chats</span></button>
         <button class="nav-btn" data-tab="setup" type="button"><svg class="ic" aria-hidden="true"><use href="#i-sliders"/></svg><span data-i18n="nav.setup">Settings</span></button>
+        <button class="nav-btn" data-tab="logs" type="button"><svg class="ic" aria-hidden="true"><use href="#i-terminal"/></svg><span data-i18n="nav.logs">Logs</span></button>
       </nav>
       <div class="side-bottom">
         <div class="side-foot" id="sideStatus"><span class="status-ico pending" aria-hidden="true"></span><span id="sideStatusText">—</span></div>
@@ -147,7 +149,10 @@
               <div class="active-model" id="activeBarModel">—</div>
             </div>
           </div>
-          <button id="btnLaunchBar" class="btn launch" type="button"><svg class="ic" aria-hidden="true"><use href="#i-play"/></svg><span data-i18n="models.launch">Open Claude</span></button>
+          <div class="active-bar-actions">
+            <button id="btnContinueChat" class="btn ghost" type="button" disabled><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg><span data-i18n="chats.continue">Continue last</span></button>
+            <button id="btnLaunchBar" class="btn launch" type="button"><svg class="ic" aria-hidden="true"><use href="#i-play"/></svg><span data-i18n="models.launch">Open Claude</span></button>
+          </div>
         </div>
 
         <div class="conn-card compact">
@@ -181,6 +186,21 @@
         </div>
 
         <div id="grid" class="grid"><div class="empty" data-i18n="grid.loading">Loading…</div></div>
+      </section>
+
+      <section class="tab hidden" id="tab-chats">
+        <header class="page-head">
+          <div>
+            <h1 data-i18n="chats.title">Claude chats</h1>
+          </div>
+          <div class="page-actions">
+            <button id="btnContinueTop" class="btn ghost" type="button" disabled><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg><span data-i18n="chats.continue">Continue last</span></button>
+            <button id="btnChatsRefresh" class="btn ghost" type="button"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg><span data-i18n="chats.refresh">Refresh</span></button>
+          </div>
+        </header>
+        <div class="chats-box" id="chatsBox">
+          <div id="chatsList" class="chats-list"><div class="chats-empty" data-i18n="chats.empty">No saved chats yet — open Claude once, then they show up here</div></div>
+        </div>
       </section>
 
       <section class="tab hidden" id="tab-setup">
@@ -285,6 +305,22 @@
         </div>
       </section>
 
+      <section class="tab hidden" id="tab-logs">
+        <header class="page-head">
+          <div>
+            <h1><svg class="ic ic-dim" aria-hidden="true"><use href="#i-terminal"/></svg><span data-i18n="logs.title">Logs</span></h1>
+            <p class="page-sub" data-i18n="logs.sub">Full FreeClaude log — nothing trimmed. Download and send it when something breaks.</p>
+          </div>
+          <div class="page-actions logs-actions">
+            <button id="btnLogsRefresh" class="btn ghost" type="button"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg><span data-i18n="logs.refresh">Refresh</span></button>
+            <button id="btnLogsDownload" class="btn accent" type="button"><svg class="ic" aria-hidden="true"><use href="#i-download"/></svg><span data-i18n="logs.download">Download</span></button>
+            <button id="btnLogsClear" class="btn ghost danger" type="button"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg><span data-i18n="logs.clear">Clear</span></button>
+          </div>
+        </header>
+        <div class="logs-meta" id="logsMeta">—</div>
+        <pre id="appLogView" class="app-log-view" aria-live="polite"></pre>
+      </section>
+
       <footer class="foot" id="foot"></footer>
     </main>
   </div>
@@ -322,82 +358,28 @@
 
   <div id="kiroModal" class="modal hidden" aria-hidden="true" aria-modal="true">
     <div class="modal-backdrop" data-kiro-close></div>
-    <div class="modal-card narrow" role="dialog" aria-labelledby="kiroModalTitle">
-      <div class="modal-head">
-        <div>
-          <h2 id="kiroModalTitle"><svg class="ic ic-dim" aria-hidden="true"><use href="#i-shield"/></svg><span data-i18n="kiro.modalTitle">Sign in to Kiro · AWS Builder ID</span></h2>
-          <p class="modal-sub" data-i18n="kiro.modalSub">Match the code in the AWS window and confirm — FreeClaude does the rest.</p>
-        </div>
-        <button type="button" class="modal-x" data-kiro-close data-i18n-aria="common.close" aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+    <div class="modal-card kiro-card" role="dialog" aria-labelledby="kiroWaitTitle">
+      <button type="button" class="modal-x kiro-x" data-kiro-close data-i18n-aria="common.close" aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+      <div class="kiro-simple" id="kiroWait">
+        <div class="kiro-ring" aria-hidden="true"></div>
+        <div class="kiro-simple-title" id="kiroWaitTitle" data-i18n="kiro.simpleTitle">Sign in to your account</div>
+        <div class="kiro-simple-sub hidden" id="kiroWaitSub"></div>
+        <button type="button" class="btn ghost small kiro-cancel hidden" data-kiro-cancel data-i18n="common.cancel">Cancel</button>
       </div>
-
-      <!-- Steps make it obvious where the login is stuck instead of one endless spinner. -->
-      <ol class="kiro-steps" id="kiroSteps">
-        <li class="kiro-step" data-step="open">
-          <span class="kiro-step-dot" aria-hidden="true"><svg class="ic"><use href="#i-browser"/></svg></span>
-          <div class="kiro-step-body">
-            <div class="kiro-step-title" data-i18n="kiro.step.open.title">Opening the AWS window</div>
-            <div class="kiro-step-sub" data-i18n="kiro.step.open.sub">A clean window with no old session</div>
-          </div>
-        </li>
-        <li class="kiro-step" data-step="code">
-          <span class="kiro-step-dot" aria-hidden="true"><svg class="ic"><use href="#i-key"/></svg></span>
-          <div class="kiro-step-body">
-            <div class="kiro-step-title" data-i18n="kiro.step.code.title">Confirm the code in AWS</div>
-            <div class="kiro-step-sub" id="kiroPollSub" data-i18n="kiro.step.code.sub">Enter the code below and press “Confirm”</div>
-          </div>
-        </li>
-        <li class="kiro-step" data-step="link">
-          <span class="kiro-step-dot" aria-hidden="true"><svg class="ic"><use href="#i-shield"/></svg></span>
-          <div class="kiro-step-body">
-            <div class="kiro-step-title" data-i18n="kiro.step.link.title">Connecting Kiro</div>
-            <div class="kiro-step-sub" data-i18n="kiro.step.link.sub">Issuing the OmniRoute key</div>
-          </div>
-        </li>
-        <li class="kiro-step" data-step="models">
-          <span class="kiro-step-dot" aria-hidden="true"><svg class="ic"><use href="#i-chip"/></svg></span>
-          <div class="kiro-step-body">
-            <div class="kiro-step-title" data-i18n="kiro.step.models.title">Loading models</div>
-            <div class="kiro-step-sub" data-i18n="kiro.step.models.sub">The list appears on the “Models” tab</div>
-          </div>
-        </li>
-      </ol>
-
-      <div class="kiro-code-box">
-        <div>
-          <div class="kiro-code-label" data-i18n="kiro.codeLabel">Device code</div>
-          <div class="kiro-code" id="kiroUserCode">————</div>
-        </div>
-        <button type="button" class="btn ghost small" id="btnKiroCopy" data-i18n-title="kiro.copyTitle" title="Copy the code"><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg><span data-i18n="kiro.copy">Copy</span></button>
-      </div>
-
-      <div class="kiro-wait" id="kiroWait">
-        <div class="kiro-wait-row">
-          <span class="kiro-spinner" aria-hidden="true">
-            <span class="kiro-dots"><i></i><i></i><i></i></span>
-            <svg class="ic kiro-spinner-ok"><use href="#i-check"/></svg>
-            <svg class="ic kiro-spinner-bad"><use href="#i-alert"/></svg>
-          </span>
-          <div class="kiro-wait-text">
-            <div class="kiro-wait-title" id="kiroWaitTitle" data-i18n="kiro.waitTitle">Waiting for the AWS sign-in…</div>
-            <div class="kiro-wait-sub" id="kiroWaitSub" data-i18n="kiro.waitSub">A clean AWS window will open with no old session. After “Request approved” wait a couple of seconds — the models come in on their own.</div>
-          </div>
-        </div>
-        <div class="kiro-progress" aria-hidden="true"><span></span></div>
-        <div class="kiro-wait-foot">
-          <span class="kiro-status" id="kiroStatus" data-i18n="kiro.statusWaiting">Waiting…</span>
-          <span class="kiro-elapsed" id="kiroElapsed"></span>
-        </div>
-      </div>
-
-      <div class="modal-actions">
-        <button type="button" class="btn ghost" id="btnKiroOpenAws"><svg class="ic" aria-hidden="true"><use href="#i-external"/></svg><span data-i18n="kiro.openAws">Open / refresh AWS</span></button>
-        <button type="button" class="btn ghost" data-kiro-cancel data-i18n="common.cancel">Cancel</button>
-        <button type="button" class="btn accent" id="btnKiroRetry" disabled data-i18n="kiro.retryWaiting">Waiting…</button>
+      <!-- Kept for the existing auth JS; not shown in the UI. -->
+      <div class="hidden" aria-hidden="true">
+        <ol class="kiro-steps" id="kiroSteps"></ol>
+        <div id="kiroUserCode"></div>
+        <span id="kiroStatus"></span>
+        <span id="kiroElapsed"></span>
+        <span id="kiroPollSub"></span>
+        <button type="button" id="btnKiroCopy"></button>
+        <button type="button" id="btnKiroOpenAws"></button>
+        <button type="button" id="btnKiroRetry"></button>
       </div>
     </div>
   </div>
 
-  <script src="/app.js?v=38"></script>
+  <script src="/app.js?v=43"></script>
 </body>
 </html>
