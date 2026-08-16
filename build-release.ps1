@@ -77,6 +77,7 @@ $sources = @(
   "omni-keys-proxy.js",
   "node-resolve.js",
   "format-duration.js",
+  "claude-sessions.js",
   "sqlite-bridge.js",
   "package.json",
   "package-lock.json"

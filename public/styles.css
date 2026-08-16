@@ -712,6 +712,67 @@ body {
 /* The active bar keeps its green frame instead of the per-brand tint. */
 .active-bar-icon[data-brand] { border-color: rgba(47, 191, 113, 0.35); }
 .active-bar-main { min-width: 0; }
+.active-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.chats-box {
+  margin: 0;
+  padding: 0;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: #0a0c11;
+  overflow: hidden;
+}
+.chats-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  min-height: min(52vh, 480px);
+  max-height: calc(100vh - 180px);
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #3a4558 transparent;
+}
+.chats-list::-webkit-scrollbar { width: 8px; }
+.chats-list::-webkit-scrollbar-thumb {
+  background: #3a4558;
+  border-radius: 999px;
+}
+.chats-empty {
+  padding: 12px 4px;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.chat-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.18);
+}
+.chat-row:hover { background: rgba(255, 255, 255, 0.04); }
+.chat-main { min-width: 0; flex: 1; }
+.chat-title {
+  font-size: 0.9rem;
+  font-weight: 560;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-meta {
+  margin-top: 2px;
+  font-size: 0.75rem;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .active-title {
   font-size: 0.72rem;
   font-weight: 800;
@@ -1413,6 +1474,65 @@ body {
  * A single spinner never told the user which half of the login was stuck: the AWS window
  * or our polling. The rail marks each stage so a stall is self-explanatory.
  */
+.kiro-card {
+  position: relative;
+  width: min(320px, 92vw);
+  padding: 40px 28px 36px;
+  text-align: center;
+}
+.kiro-x {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+}
+.kiro-simple {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+}
+.kiro-ring {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.1);
+  border-top-color: #7c9cff;
+  animation: kiro-spin 0.85s linear infinite;
+}
+.kiro-simple.done .kiro-ring,
+.kiro-simple.error .kiro-ring {
+  animation: none;
+  border-color: transparent;
+  border-top-color: transparent;
+  background: rgba(47, 191, 113, 0.15);
+  box-shadow: inset 0 0 0 3px rgba(47, 191, 113, 0.55);
+}
+.kiro-simple.error .kiro-ring {
+  background: rgba(255, 90, 90, 0.12);
+  box-shadow: inset 0 0 0 3px rgba(255, 110, 110, 0.55);
+}
+.kiro-simple-title {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+.kiro-simple.error .kiro-simple-title { color: #ff9a9a; }
+.kiro-simple.done .kiro-simple-title { color: #6ee7a8; }
+.kiro-simple-sub {
+  margin: 0;
+  max-width: 28ch;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  color: var(--muted);
+}
+.kiro-simple-sub.hidden { display: none; }
+.kiro-cancel { margin-top: 4px; }
+@keyframes kiro-spin {
+  to { transform: rotate(360deg); }
+}
+
 .kiro-steps {
   list-style: none;
   margin: 0;

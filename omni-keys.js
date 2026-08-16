@@ -466,6 +466,27 @@ function logoutKiro(connectionId = null) {
   }
 }
 
+/** Remove FreeClaude-issued OmniRoute keys (and optionally the exact token in use). */
+function clearFreeClaudeKeys(currentKey = null) {
+  const db = getDb(false);
+  try {
+    const cols = new Set(tableColumns(db, "api_keys"));
+    if (!cols.has("key") && !cols.has("name")) return { ok: true, removed: 0 };
+    let removed = 0;
+    if (currentKey && cols.has("key")) {
+      removed += Number(db.prepare(`DELETE FROM api_keys WHERE key = ?`).run(String(currentKey)).changes || 0);
+    }
+    if (cols.has("name")) {
+      removed += Number(
+        db.prepare(`DELETE FROM api_keys WHERE lower(name) LIKE 'freeclaude%'`).run().changes || 0
+      );
+    }
+    return { ok: true, removed };
+  } finally {
+    db.close();
+  }
+}
+
 function getAccountLimitInfo() {
   const kiro = getKiroStatus();
   try {
@@ -656,6 +677,7 @@ module.exports = {
   getKiroStatus,
   getKeyUsage,
   logoutKiro,
+  clearFreeClaudeKeys,
   clearKiroCooldowns,
   getAccountLimitInfo,
   healKiroConnections,

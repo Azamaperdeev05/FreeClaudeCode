@@ -12,12 +12,14 @@ const { createAxiom } = require("./axiom");
 const { describeUpstreamError } = require("./errors");
 const { kiroStateFromProviders } = require("./kiro-state");
 const { createAppLog } = require("./app-log");
+const { listClaudeSessions, isSessionId } = require("./claude-sessions");
 const i18n = require("./i18n");
 
 const execFileAsync = promisify(execFile);
 
 const PORT = 3847;
 const OMNI = "http://127.0.0.1:20128";
+const OMNI_HOSTS = ["127.0.0.1", "localhost"];
 const OMNI_PORT = 20128;
 const SETTINGS = path.join(process.env.USERPROFILE || os.homedir(), ".claude", "settings.json");
 const PROFILE_DIR = path.join(process.env.USERPROFILE || os.homedir(), ".claude", "profiles", "active-freeclaude");
@@ -64,7 +66,7 @@ const NPM_BIN = path.join(process.env.APPDATA || "", "npm");
 const LOCALAPPDATA = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
 const NODE_PORTABLE_DIR = path.join(LOCALAPPDATA, "Programs", "node");
 const MIN_NODE_MAJOR = 22;
-const ACCESS_URL = "https://pastebin.com/raw/rJp7g0eB";
+const ACCESS_URL = "https://pastebin.com/raw/8tzPV0Bu";
 const TELEGRAM_URL = "https://t.me/loveaideep";
 const AWS_SIGNOUT_URL = "https://view.awsapps.com/start/#/signout";
 const AWS_PORTAL_URL = "https://view.awsapps.com/start";
@@ -321,21 +323,36 @@ function runOmniPasswordReset(password) {
   return out;
 }
 
+let restartOmniLock = null;
+
 async function restartOmniRoute() {
-  killOmniRouteListeners();
-  const free = await waitForOmniPortFree(20000);
-  if (!free) {
-    // Last try: kill again and wait a bit more before giving ensureOmni a shot.
-    killOmniRouteListeners();
-    await waitForOmniPortFree(10000);
+  // Serialize kill+ensure so two restarts cannot murder each other's spawn.
+  if (restartOmniLock) {
+    appLog.info("OmniRoute restart: waiting for in-flight restart");
+    return restartOmniLock;
   }
-  let up = await ensureOmni(90000, { forceStart: true });
-  if (!up) {
+  restartOmniLock = (async () => {
+    appLog.info("OmniRoute restart: killing listeners on :20128");
     killOmniRouteListeners();
-    await waitForOmniPortFree(15000);
-    up = await ensureOmni(90000, { forceStart: true });
-  }
-  return up;
+    const free = await waitForOmniPortFree(20000);
+    if (!free) {
+      appLog.warn("OmniRoute restart: port still busy after wait — killing again");
+      killOmniRouteListeners();
+      await waitForOmniPortFree(10000);
+    }
+    let up = await ensureOmni(90000, { forceStart: true });
+    if (!up) {
+      appLog.warn("OmniRoute restart: first ensure failed — retry");
+      killOmniRouteListeners();
+      await waitForOmniPortFree(15000);
+      up = await ensureOmni(90000, { forceStart: true });
+    }
+    appLog.info(`OmniRoute restart: ${up ? "online" : "FAILED"}`);
+    return up;
+  })().finally(() => {
+    restartOmniLock = null;
+  });
+  return restartOmniLock;
 }
 
 /** True when something already accepts TCP on OmniRoute's port (even if /health is dead). */
@@ -941,8 +958,30 @@ function readConfig() {
 
 function writeConfig(patch) {
   const next = { ...readConfig(), ...patch };
+  // Explicit null/undefined removes a key (needed for apiKey clear).
+  for (const [k, v] of Object.entries(patch || {})) {
+    if (v == null) delete next[k];
+  }
   fs.writeFileSync(CONFIG, JSON.stringify(next, null, 2));
   return next;
+}
+
+/** Drop the saved OmniRoute key from FreeClaude + Claude Code settings. */
+function clearLocalApiKey() {
+  writeConfig({ apiKey: null });
+  for (const file of [SETTINGS, path.join(PROFILE_DIR, "settings.json")]) {
+    try {
+      const settings = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (settings?.env) {
+        delete settings.env.ANTHROPIC_AUTH_TOKEN;
+        delete settings.env.ANTHROPIC_MODEL;
+        delete settings.env.ANTHROPIC_BASE_URL;
+        fs.writeFileSync(file, JSON.stringify(settings, null, 2));
+      }
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 /** English until the user picks otherwise in Settings. */
@@ -953,6 +992,57 @@ function currentLang() {
 /** Server-side translate: every user-facing string the API or the install log emits. */
 function st(key, vars) {
   return i18n.t(currentLang(), key, vars);
+}
+
+/** Short colored CMD lines (Windows Terminal / modern conhost). */
+const ANSI = {
+  reset: "\x1b[0m",
+  dim: "\x1b[2m",
+  bold: "\x1b[1m",
+  cyan: "\x1b[36m",
+  green: "\x1b[32m",
+  yellow: "\x1b[33m",
+  red: "\x1b[31m",
+  magenta: "\x1b[35m",
+};
+function enableAnsiConsole() {
+  try {
+    if (process.platform === "win32" && process.stdout.isTTY) {
+      // Node 22+ often has VT already; this is a no-op fallback hint for older hosts.
+      process.stdout.write("");
+    }
+  } catch {
+    /* ignore */
+  }
+}
+function conSay(kind, text) {
+  const color =
+    kind === "ok"
+      ? ANSI.green
+      : kind === "warn"
+        ? ANSI.yellow
+        : kind === "err"
+          ? ANSI.red
+          : kind === "dim"
+            ? ANSI.dim
+            : ANSI.cyan;
+  const line = `${color}${text}${ANSI.reset}`;
+  if (kind === "err") console.error(line);
+  else console.log(line);
+}
+function isNoisyOmniLine(line) {
+  const s = String(line || "")
+    .replace(/\x1b\[[0-9;]*m/g, "")
+    .trim();
+  if (!s) return true;
+  if (/^[_/\\| ]{8,}$/.test(s)) return true;
+  if (/Loaded env from/i.test(s)) return true;
+  if (/Starting server/i.test(s)) return true;
+  if (/OmniRoute is running/i.test(s)) return true;
+  if (/Dashboard:|API Base:|Point your CLI|Press Ctrl/i.test(s)) return true;
+  if (/^v\d+\.\d+/.test(s)) return true;
+  if (/____|\/ __ \\|\\| __ \||\\|__\||\\\\____\//.test(s)) return true;
+  return false;
 }
 
 function readToken() {
@@ -987,17 +1077,136 @@ function readActiveModel() {
 }
 
 async function isOmniUp() {
-  try {
-    const r = await fetch(`${OMNI}/api/monitoring/health`, { signal: AbortSignal.timeout(2500) });
-    return r.ok;
-  } catch {
-    return false;
+  // System HTTP_PROXY can make undici fetch to 127.0.0.1 hang (ETIMEDOUT) while
+  // OmniRoute is fine — Byba's machine showed that. Prefer raw http (ignores proxy).
+  ensureLocalhostNoProxy();
+
+  for (const host of OMNI_HOSTS) {
+    for (const pathname of ["/api/health", "/api/monitoring/health", "/"]) {
+      if (await httpProbeOmni(host, pathname)) return true;
+    }
+    if (await canTcpOmni(host, 700)) return true;
   }
+  return false;
+}
+
+function httpProbeOmni(host, pathname) {
+  return new Promise((resolve) => {
+    const req = http.get(
+      {
+        host,
+        port: OMNI_PORT,
+        path: pathname,
+        timeout: 2000,
+        headers: { Connection: "close" },
+      },
+      (res) => {
+        res.resume();
+        resolve(Number(res.statusCode) > 0);
+      }
+    );
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => {
+      try {
+        req.destroy();
+      } catch {
+        /* ignore */
+      }
+      resolve(false);
+    });
+  });
+}
+
+function canTcpOmni(host = "127.0.0.1", timeoutMs = 700) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host, port: OMNI_PORT });
+    const done = (ok) => {
+      try {
+        socket.destroy();
+      } catch {
+        /* ignore */
+      }
+      resolve(ok);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => done(true));
+    socket.once("timeout", () => done(false));
+    socket.once("error", () => done(false));
+  });
+}
+
+/** Strip corporate proxy vars so OmniRoute and our health probes can reach loopback. */
+function ensureLocalhostNoProxy() {
+  const extra = "127.0.0.1,localhost,::1";
+  for (const key of ["NO_PROXY", "no_proxy"]) {
+    const cur = String(process.env[key] || "");
+    if (!/127\.0\.0\.1/i.test(cur)) {
+      process.env[key] = cur ? `${cur},${extra}` : extra;
+    }
+  }
+}
+
+function omniChildEnv() {
+  ensureLocalhostNoProxy();
+  const env = {
+    ...process.env,
+    PATH: `${nodeDir()};${npmBinDir()};${enrichedPath()}`,
+    NO_PROXY: process.env.NO_PROXY || "127.0.0.1,localhost,::1",
+    no_proxy: process.env.no_proxy || process.env.NO_PROXY || "127.0.0.1,localhost,::1",
+    // Prefer an explicit loopback bind — some Windows setups + proxy break "localhost".
+    HOST: "127.0.0.1",
+    PORT: String(OMNI_PORT),
+  };
+  // Do not let a machine-wide proxy swallow OmniRoute's self-checks on :20128.
+  for (const key of [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+  ]) {
+    delete env[key];
+  }
+  return env;
+}
+
+/** Prefer Node 22/23 for OmniRoute when the default is 24+ (seen hanging on :20128 bind). */
+function resolveNodeForOmni() {
+  const primary = resolveNode();
+  const primaryMajor = nodeMajorVersion(primary);
+  if (primaryMajor !== null && primaryMajor >= MIN_NODE_MAJOR && primaryMajor < 24) {
+    return primary;
+  }
+  const candidates = [
+    path.join(NODE_DIR_DEFAULT, "node.exe"),
+    path.join(process.env.LOCALAPPDATA || "", "Programs", "node", "node.exe"),
+    path.join("C:\\Program Files", "nodejs", "node.exe"),
+    path.join("D:\\Program Files", "nodejs", "node.exe"),
+    whereOnPath("node.exe"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (!candidate || !fs.existsSync(candidate)) continue;
+      const major = nodeMajorVersion(candidate);
+      if (major !== null && major >= MIN_NODE_MAJOR && major < 24) {
+        if (candidate !== primary) {
+          appLog.info(`OmniRoute: using Node ${major} (${candidate}) instead of ${primaryMajor || "?"}`);
+        }
+        return candidate;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return primary;
 }
 
 let omniChild = null;
 let omniStopping = false;
 let omniOwned = false; // true if FreeClaude should kill :20128 on exit
+/** Single-flight lock so parallel ensureOmni calls cannot kill each other's spawn. */
+let ensureOmniLock = null;
 
 function killOmniRouteListeners() {
   // Drop our handle first so startOmniRoute will not think the child is still alive.
@@ -1118,9 +1327,9 @@ try { Remove-Item -Path '${scriptPath.replace(/\\/g, "\\\\")}' -Force } catch {}
       windowsHide: true,
     });
     child.unref();
-    console.log(`OmniRoute watcher spawned (PID ${child.pid})`);
+    appLog.info(`OmniRoute watcher spawned (PID ${child.pid})`);
   } catch (err) {
-    console.error("OmniRoute watcher spawn failed:", err && err.message ? err.message : err);
+    appLog.error(`OmniRoute watcher spawn failed: ${err && err.message ? err.message : err}`);
   }
 
   // Cleanup old watcher scripts (older than 2 days)
@@ -1185,10 +1394,7 @@ function startOmniRoute(opts = {}) {
   const omniCmd = omniCmdPath();
   if (!whichExists(mjs) && !whichExists(omniCmd)) return false;
 
-  const env = {
-    ...process.env,
-    PATH: `${nodeDir()};${npmBinDir()};${enrichedPath()}`,
-  };
+  const env = omniChildEnv();
 
   // OmniRoute — дочерний процесс FreeClaude (не detached-сирота).
   // При закрытии FreeClaude убиваем OmniRoute.
@@ -1200,67 +1406,123 @@ function startOmniRoute(opts = {}) {
     if (opts.force) omniChild = null;
 
     installOmniShutdownHooks();
-
-    console.log("");
-    console.log("────────────────────────────────────────");
-    console.log(`  ${st("con.banner1")}`);
-    console.log(`  ${st("con.banner2")}`);
-    console.log(`  ${OMNI}`);
-    console.log("────────────────────────────────────────");
-    console.log("");
+    const proxyWasSet = Boolean(
+      process.env.HTTP_PROXY ||
+        process.env.HTTPS_PROXY ||
+        process.env.ALL_PROXY ||
+        process.env.http_proxy ||
+        process.env.https_proxy
+    );
+    appLog.info(`OmniRoute start ${OMNI}${proxyWasSet ? " (proxy cleared for child)" : ""}`);
 
     let child;
-    const nodeBin = resolveNode();
+    const nodeBin = resolveNodeForOmni();
+    // Pipe stdout/stderr so exit code 1 is explainable in the Logs tab.
+    const spawnOpts = {
+      detached: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+      env,
+    };
     if (nodeBin && whichExists(mjs)) {
       child = spawn(nodeBin, [mjs, "serve", "--no-open"], {
-        detached: false,
-        stdio: "ignore",
-        windowsHide: true,
-        env,
+        ...spawnOpts,
         cwd: path.join(npmBinDir(), "node_modules", "omniroute"),
       });
     } else {
-      child = spawn(process.env.ComSpec || "cmd.exe", ["/d", "/c", omniCmd, "serve", "--no-open"], {
-        detached: false,
-        stdio: "ignore",
-        windowsHide: true,
-        env,
-      });
+      child = spawn(process.env.ComSpec || "cmd.exe", ["/d", "/c", omniCmd, "serve", "--no-open"], spawnOpts);
     }
     omniChild = child;
     omniOwned = true;
-    child.on("error", (err) => console.error("OmniRoute spawn error:", err.message));
-    child.on("exit", (code) => {
+
+    let errBuf = "";
+    let outBuf = "";
+    const flushSide = (kind, chunk) => {
+      const text = String(chunk || "");
+      if (kind === "err") errBuf = (errBuf + text).slice(-8000);
+      else outBuf = (outBuf + text).slice(-4000);
+      const lines = text.split(/\r\n|\n|\r/).filter((l) => l.trim());
+      for (const line of lines.slice(0, 40)) {
+        if (isNoisyOmniLine(line)) continue;
+        // Real problems only — ASCII banner / "running!" spam stays out of the log.
+        if (kind === "err") appLog.warn(`OmniRoute: ${line.slice(0, 500)}`);
+        else appLog.debug(`OmniRoute: ${line.slice(0, 500)}`);
+      }
+    };
+    if (child.stderr) child.stderr.on("data", (d) => flushSide("err", d));
+    if (child.stdout) child.stdout.on("data", (d) => flushSide("out", d));
+
+    child.on("error", (err) => {
+      conSay("err", st("con.line.omniOff"));
+      appLog.error(`OmniRoute spawn error: ${err.message}`);
+    });
+    child.on("exit", (code, signal) => {
       if (omniChild === child) omniChild = null;
-      console.log(`OmniRoute stopped (code ${code})`);
+      const tail = (errBuf || outBuf)
+        .replace(/\x1b\[[0-9;]*m/g, "")
+        .split(/\r\n|\n|\r/)
+        .filter((l) => l.trim() && !isNoisyOmniLine(l))
+        .join("\n")
+        .trim()
+        .slice(-800);
+      const msg = `OmniRoute stopped (code ${code}${signal ? ` signal=${signal}` : ""})${tail ? ` :: ${tail}` : ""}`;
+      // Restarts intentionally kill the child — keep that out of the CMD window.
+      if (code && code !== 0) appLog.error(msg);
+      else appLog.info(msg);
     });
     return true;
   } catch (err) {
-    console.error("OmniRoute start failed:", err && err.message ? err.message : err);
+    conSay("err", st("con.line.omniOff"));
+    appLog.error(`OmniRoute start failed: ${err && err.message ? err.message : err}`);
     return false;
   }
 }
 
 async function ensureOmni(timeoutMs = 90000, opts = {}) {
+  // Serialize: install + main bootstrap + logout restart used to race and kill each other.
+  if (ensureOmniLock) {
+    appLog.info("OmniRoute ensure: waiting for in-flight ensure");
+    return ensureOmniLock;
+  }
+  ensureOmniLock = ensureOmniInner(timeoutMs, opts).finally(() => {
+    ensureOmniLock = null;
+  });
+  return ensureOmniLock;
+}
+
+async function ensureOmniInner(timeoutMs = 90000, opts = {}) {
   try {
     installOmniShutdownHooks();
     if (await isOmniUp()) {
       // Даже чужой/старый OmniRoute считаем «нашим» для cleanup при выходе
       omniOwned = true;
       if (opts.liveLog) pushLog(st("log.omniAlreadyOnline"));
+      else appLog.info("OmniRoute already online");
       return true;
     }
-    if (!isOmniRouteInstalled()) return false;
+    if (!isOmniRouteInstalled()) {
+      appLog.warn("OmniRoute ensure: not installed");
+      return false;
+    }
 
-    // Port occupied by a dead/half-booted OmniRoute: health fails forever until we free it.
+    // Port occupied by someone else (orphan). If our child is still booting, wait — do not kill it.
     if (await isOmniPortBusy()) {
-      if (opts.liveLog) pushLog(st("log.omniPortBusy"));
-      killOmniRouteListeners();
-      await waitForOmniPortFree(15000);
+      const oursAlive = Boolean(omniChild && omniChild.exitCode == null);
+      if (oursAlive) {
+        appLog.info("OmniRoute ensure: port busy but our child is starting — waiting");
+      } else {
+        if (opts.liveLog) pushLog(st("log.omniPortBusy"));
+        else appLog.warn("OmniRoute ensure: port 20128 busy — freeing orphan");
+        killOmniRouteListeners();
+        await waitForOmniPortFree(15000);
+      }
     }
 
     if (opts.liveLog) pushLog(st("log.omniStarting"));
-    startOmniRoute({ force: Boolean(opts.forceStart) });
+    else appLog.info("OmniRoute ensure: starting");
+    if (!(omniChild && omniChild.exitCode == null)) {
+      startOmniRoute({ force: Boolean(opts.forceStart) });
+    }
     omniOwned = true;
     const start = Date.now();
     let lastBeat = 0;
@@ -1268,17 +1530,22 @@ async function ensureOmni(timeoutMs = 90000, opts = {}) {
     while (Date.now() - start < timeoutMs) {
       if (opts.checkCancel && installState.cancelRequested) {
         if (opts.liveLog) pushLog(st("log.omniWaitCancelled"));
+        appLog.warn("OmniRoute ensure: wait cancelled");
         return false;
       }
       await sleep(500);
       if (await isOmniUp()) {
-        if (opts.liveLog) pushLog(st("log.omniOnlineIn", { sec: Math.round((Date.now() - start) / 1000) }));
+        const sec = Math.round((Date.now() - start) / 1000);
+        if (opts.liveLog) pushLog(st("log.omniOnlineIn", { sec }));
+        else appLog.info(`OmniRoute ensure: online in ${sec}s`);
         return true;
       }
-      // Spawn died or never became healthy: free the port and try once more mid-wait.
-      if (!retriedSpawn && Date.now() - start > 8000 && !(await isOmniUp())) {
+      // Respawn only if the child actually died — OmniRoute often needs >15s on first boot.
+      const childDead = !omniChild || omniChild.exitCode != null;
+      if (!retriedSpawn && childDead && Date.now() - start > 5000 && !(await isOmniUp())) {
         retriedSpawn = true;
         if (opts.liveLog) pushLog(st("log.omniRetryStart"));
+        else appLog.warn("OmniRoute ensure: child exited — respawn");
         killOmniRouteListeners();
         await waitForOmniPortFree(10000);
         startOmniRoute({ force: true });
@@ -1292,13 +1559,32 @@ async function ensureOmni(timeoutMs = 90000, opts = {}) {
       }
     }
     if (opts.liveLog) pushLog(st("log.omniTimeout"));
+    const portBusy = await isOmniPortBusy();
+    const childCode = omniChild && omniChild.exitCode != null ? omniChild.exitCode : null;
+    const childAlive = Boolean(omniChild && omniChild.exitCode == null);
+    appLog.error(
+      `OmniRoute ensure: timeout after ${timeoutMs}ms portBusy=${portBusy} childAlive=${childAlive} childExit=${childCode}`
+    );
+    if (opts.liveLog) {
+      if (portBusy) pushLog(st("log.omniTimeoutPortBusy"));
+      else if (childAlive) {
+        const proxyHint =
+          process.env.HTTP_PROXY || process.env.HTTPS_PROXY || process.env.http_proxy
+            ? st("log.omniTimeoutProxy")
+            : st("log.omniTimeoutChildAlive");
+        pushLog(proxyHint);
+      } else if (childCode != null) pushLog(st("log.omniTimeoutChildExit", { code: childCode }));
+      else pushLog(st("log.omniTimeoutHint"));
+    }
     return false;
   } catch (err) {
     console.error("ensureOmni failed:", err && err.message ? err.message : err);
     if (opts.liveLog) pushLog(`OmniRoute: ${err && err.message ? err.message : err}`);
+    appLog.error(`ensureOmni failed: ${err && err.message ? err.message : err}`);
     return false;
   }
 }
+
 
 function assertSafeModel(model) {
   const value = String(model || "").trim();
@@ -2055,9 +2341,15 @@ async function installAll() {
     assertNotCancelled();
     pushLog(up ? st("log.omniOnline") : st("log.omniOffline"));
 
-    installState.step = "done";
-    installState.ok = true;
-    pushLog(st("log.allDone"));
+    if (!up) {
+      installState.step = "error";
+      installState.ok = false;
+      pushLog(st("log.omniInstallIncomplete"));
+    } else {
+      installState.step = "done";
+      installState.ok = true;
+      pushLog(st("log.allDone"));
+    }
   } catch (err) {
     installState.ok = false;
     installState.step = installState.cancelRequested ? "stopped" : "error";
@@ -2109,7 +2401,51 @@ function isTrustedRequest(req) {
   return req.method === "GET" || req.method === "HEAD";
 }
 
+function summarizeLogPayload(data) {
+  if (data == null) return "";
+  if (typeof data === "string") return data.slice(0, 600);
+  if (typeof data !== "object") return String(data);
+  const bits = [];
+  if (data.ok === false) bits.push("ok=false");
+  if (data.error) bits.push(`error=${String(data.error).slice(0, 500)}`);
+  if (data.message) bits.push(`message=${String(data.message).slice(0, 300)}`);
+  if (data.reason && typeof data.reason === "object") {
+    if (data.reason.kind) bits.push(`kind=${data.reason.kind}`);
+    if (data.reason.title) bits.push(`title=${data.reason.title}`);
+    if (data.reason.raw) bits.push(`raw=${String(data.reason.raw).slice(0, 300)}`);
+  }
+  if (data.status != null) bits.push(`upstream=${data.status}`);
+  if (data.removed != null) bits.push(`removed=${data.removed}`);
+  if (data.snapshotsCleared != null) bits.push(`snapshots=${data.snapshotsCleared}`);
+  if (data.omniRestarted != null) bits.push(`omniRestarted=${data.omniRestarted}`);
+  if (data.banned) bits.push("banned=true");
+  if (data.limited) bits.push("limited=true");
+  if (data.modelsCount != null) bits.push(`models=${data.modelsCount}`);
+  if (data.kiroConnected != null) bits.push(`kiro=${data.kiroConnected}`);
+  if (!bits.length) {
+    try {
+      return JSON.stringify(data).slice(0, 500);
+    } catch {
+      return "";
+    }
+  }
+  return bits.join(" ");
+}
+
 function send(res, status, data, type = "application/json") {
+  try {
+    const where = res.__fcRoute || "HTTP";
+    const quiet = /\/api\/logs(?:\/|$)/.test(where);
+    if (!quiet && String(type).includes("json")) {
+      if (status >= 400) {
+        appLog.error(`${where} → ${status} ${summarizeLogPayload(data)}`);
+      } else if (data && typeof data === "object" && data.ok === false) {
+        appLog.warn(`${where} → ${status} ${summarizeLogPayload(data)}`);
+      }
+    }
+  } catch {
+    /* never break responses because of logging */
+  }
   let body;
   if (Buffer.isBuffer(data)) body = data;
   else if (typeof data === "string") body = data;
@@ -2200,9 +2536,12 @@ async function readBody(req) {
   return body ? JSON.parse(body) : {};
 }
 
+let lastQuotaLogSig = "";
+
 const server = http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url, `http://127.0.0.1:${PORT}`);
+    res.__fcRoute = `${req.method} ${u.pathname}`;
 
     if (!isTrustedRequest(req)) {
       return send(res, 403, { ok: false, error: st("srv.untrustedOrigin") });
@@ -2370,39 +2709,15 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && u.pathname === "/api/key/clear") {
       try {
-        // Удаляем ключ из config.json
-        const cfg = readConfig();
-        delete cfg.apiKey;
-        writeConfig(cfg);
-
-        // Удаляем ключ из Claude Code settings.json
+        const prev = readToken();
+        clearLocalApiKey();
+        let keysRemoved = 0;
         try {
-          const settings = JSON.parse(fs.readFileSync(SETTINGS, "utf8"));
-          if (settings?.env) {
-            delete settings.env.ANTHROPIC_AUTH_TOKEN;
-            delete settings.env.ANTHROPIC_MODEL;
-            delete settings.env.ANTHROPIC_BASE_URL;
-          }
-          fs.writeFileSync(SETTINGS, JSON.stringify(settings, null, 2));
-        } catch {
-          /* ignore */
+          keysRemoved = Number(omniKeys.clearFreeClaudeKeys(prev || null)?.removed || 0);
+        } catch (err) {
+          appLog.warn(`clearFreeClaudeKeys: ${err.message || err}`);
         }
-
-        // Удаляем ключ из профиля active-freeclaude
-        try {
-          const profilePath = path.join(PROFILE_DIR, "settings.json");
-          const settings = JSON.parse(fs.readFileSync(profilePath, "utf8"));
-          if (settings?.env) {
-            delete settings.env.ANTHROPIC_AUTH_TOKEN;
-            delete settings.env.ANTHROPIC_MODEL;
-            delete settings.env.ANTHROPIC_BASE_URL;
-          }
-          fs.writeFileSync(profilePath, JSON.stringify(settings, null, 2));
-        } catch {
-          /* ignore */
-        }
-
-        return send(res, 200, { ok: true, cleared: true });
+        return send(res, 200, { ok: true, cleared: true, keysRemoved });
       } catch (err) {
         return send(res, 500, { ok: false, error: String(err.message || err) });
       }
@@ -2486,6 +2801,15 @@ const server = http.createServer(async (req, res) => {
           account.resetInMs = 0;
           account.resetInText = null;
         }
+        const quotaSig = `${Boolean(account.banned)}|${Boolean(account.limited)}|${Boolean(account.connected)}|${account.banReason || ""}|${account.resetInMs || 0}`;
+        if ((account.banned || account.limited) && quotaSig !== lastQuotaLogSig) {
+          lastQuotaLogSig = quotaSig;
+          appLog.warn(
+            `Quota: connected=${Boolean(account.connected)} banned=${Boolean(account.banned)} limited=${Boolean(account.limited)} resetInMs=${account.resetInMs || 0} reason=${String(account.banReason || account.resetInText || "").slice(0, 200)}`
+          );
+        } else if (!account.banned && !account.limited) {
+          lastQuotaLogSig = quotaSig;
+        }
         return send(res, 200, {
           activeKey: usage.masked || maskToken(token),
           usage,
@@ -2509,11 +2833,13 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && u.pathname === "/api/kiro/start") {
       try {
+        appLog.info("Kiro OAuth: start device-code flow");
         const body = await readBody(req);
         const flow = await startKiroBuilderIdFlow();
         // Only spawn a separate Chrome --app if client explicitly asks (legacy).
         const openAuth = body.open === true;
         if (openAuth) openUrlApp(flow.verificationUriComplete);
+        appLog.info(`Kiro OAuth: code ${flow.userCode || "?"} issued`);
         return send(res, 200, { ok: true, ...flow, opened: openAuth });
       } catch (err) {
         return send(res, 500, { ok: false, error: String(err.message || err) });
@@ -2530,11 +2856,18 @@ const server = http.createServer(async (req, res) => {
           modelsCount: 0,
         };
         if (result.success) {
+          appLog.info("Kiro OAuth: device code approved — finalizing");
           try {
             extras = await finalizeKiroAuth();
+            appLog.info(
+              `Kiro OAuth: finalize ready=${extras.ready} connected=${extras.kiroConnected} models=${extras.modelsCount}`
+            );
           } catch (err) {
             extras.keyIssued = { error: String(err.message || err) };
+            appLog.error(`Kiro OAuth: finalize failed: ${err.message || err}`);
           }
+        } else if (result.error && !result.pending) {
+          appLog.warn(`Kiro OAuth: poll failed: ${result.error}`);
         }
         return send(res, 200, { ok: true, ...result, ...extras });
       } catch (err) {
@@ -2564,22 +2897,46 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "POST" && u.pathname === "/api/kiro/aws-signout") {
-      // Выход из AWS Access Portal в чистом окне (сессия Builder ID)
+      // Purge + clear key + open AWS window immediately; restart OmniRoute in the background
+      // so the UI is not stuck ~7s waiting for a full respawn.
+      appLog.info("Kiro: AWS sign-out requested");
+      const prevToken = readToken();
       let purged = null;
       try {
         purged = omniKeys.logoutKiro(null);
-      } catch {
+        appLog.info(
+          `Kiro: purged connections removed=${purged?.removed ?? "?"} snapshots=${purged?.snapshotsCleared ?? "?"}`
+        );
+      } catch (err) {
         purged = null;
+        appLog.error(`Kiro: purge on AWS sign-out failed: ${err.message || err}`);
+      }
+      let keysCleared = 0;
+      try {
+        clearLocalApiKey();
+        keysCleared = Number(omniKeys.clearFreeClaudeKeys(prevToken || null)?.removed || 0);
+        appLog.info(`Kiro: API key cleared keysRemoved=${keysCleared}`);
+      } catch (err) {
+        appLog.error(`Kiro: clear key on AWS sign-out failed: ${err.message || err}`);
       }
       invalidateKiroHttpCache();
-      const omniRestarted = await restartOmniRoute().catch(() => false);
       const opened = openAwsSignOut();
+      void restartOmniRoute()
+        .then((ok) => {
+          appLog.info(`Kiro: OmniRoute restart after sign-out ok=${Boolean(ok)}`);
+        })
+        .catch((err) => {
+          appLog.error(`Kiro: OmniRoute restart after sign-out failed: ${err.message || err}`);
+        });
+      appLog.info(`Kiro: AWS sign-out window opened=${Boolean(opened?.opened)} omniRestart=background`);
       return send(res, 200, {
         ok: true,
         message: st("srv.awsSignOutOpened"),
         telegram: TELEGRAM_URL,
         purged,
-        omniRestarted: Boolean(omniRestarted),
+        keyCleared: true,
+        keysRemoved: keysCleared,
+        omniRestarted: "background",
         ...opened,
       });
     }
@@ -2587,14 +2944,32 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && u.pathname === "/api/kiro/logout") {
       try {
         const body = await readBody(req);
+        appLog.info(`Kiro: logout id=${body.id || "all"}`);
+        const prevToken = readToken();
         const result = omniKeys.logoutKiro(body.id || null);
+        appLog.info(
+          `Kiro: logout done removed=${result?.removed ?? "?"} snapshots=${result?.snapshotsCleared ?? "?"}`
+        );
+        let keysRemoved = 0;
+        try {
+          clearLocalApiKey();
+          keysRemoved = Number(omniKeys.clearFreeClaudeKeys(prevToken || null)?.removed || 0);
+          appLog.info(`Kiro: API key cleared keysRemoved=${keysRemoved}`);
+        } catch (err) {
+          appLog.warn(`Kiro: clear key on logout failed: ${err.message || err}`);
+        }
         invalidateKiroHttpCache();
         // Drop OmniRoute's in-memory "all accounts exhausted" cache so the next
         // Builder ID is not sticky-limited for ~5 minutes.
-        const omniRestarted = await restartOmniRoute().catch(() => false);
+        const omniRestarted = await restartOmniRoute().catch((err) => {
+          appLog.error(`Kiro: OmniRoute restart after logout failed: ${err.message || err}`);
+          return false;
+        });
         return send(res, 200, {
           ok: true,
           ...result,
+          keyCleared: true,
+          keysRemoved,
           omniRestarted: Boolean(omniRestarted),
         });
       } catch (err) {
@@ -2741,12 +3116,16 @@ const server = http.createServer(async (req, res) => {
             r.json?.message ||
             (typeof r.json?.error === "string" ? r.json.error : null) ||
             r.text.slice(0, 220);
+          appLog.warn(
+            `API test model=${model} status=${r.status} err=${String(err).slice(0, 400)} body=${String(r.text || "").slice(0, 500)}`
+          );
           return send(res, 200, { ok: false, status: r.status, error: String(err), reason: describeUpstreamError(r.status, err, currentLang()), ms });
         }
         return send(res, 200, { ok: true, status: r.status, reply: r.json?.content?.[0]?.text || "", ms });
       } catch (err) {
         // A dead OmniRoute throws instead of answering, and that is worth explaining too.
         const message = String(err.message || err);
+        appLog.error(`API test model=${model} threw: ${message}`);
         return send(res, 200, {
           ok: false,
           status: null,
@@ -2769,7 +3148,33 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, model, activeModel: model });
     }
 
+    if (req.method === "GET" && u.pathname === "/api/claude/sessions") {
+      try {
+        const limit = Number(u.searchParams.get("limit") || 25);
+        const sessions = listClaudeSessions({
+          profileDir: path.join(PROFILE_DIR, "projects"),
+          limit,
+        });
+        return send(res, 200, { ok: true, sessions });
+      } catch (err) {
+        return send(res, 500, { ok: false, error: String(err.message || err) });
+      }
+    }
+
     if (req.method === "POST" && u.pathname === "/api/launch") {
+      const body = await readBody(req).catch(() => ({}));
+      const mode = String(body.mode || "new").toLowerCase();
+      const sessionId = String(body.sessionId || "").trim();
+      const cwdRaw = String(body.cwd || "").trim();
+
+      if (mode === "resume") {
+        if (!isSessionId(sessionId)) {
+          return send(res, 400, { ok: false, error: st("srv.badSessionId") });
+        }
+      } else if (mode !== "new" && mode !== "continue") {
+        return send(res, 400, { ok: false, error: st("srv.badLaunchMode") });
+      }
+
       const token = readToken();
       const model = readActiveModel() || "kiro/claude-sonnet-4.5";
       if (!token) return send(res, 400, { ok: false, error: st("srv.noKey") });
@@ -2788,8 +3193,22 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
-      // %APPDATA% / %USERPROFILE% keep the call working when the absolute path has
-      // Cyrillic letters that cmd.exe would otherwise misread.
+      let launchCwd = DATA_DIR;
+      if (cwdRaw && path.isAbsolute(cwdRaw) && fs.existsSync(cwdRaw) && !/["|&<>^%\r\n]/.test(cwdRaw)) {
+        // spawn cwd accepts non-ASCII; do not force PATH_RE (that is for .bat bodies).
+        launchCwd = cwdRaw;
+      }
+
+      let claudeArgs = "";
+      let title = `Claude Code - ${model}`;
+      if (mode === "continue") {
+        claudeArgs = "--continue";
+        title = "Claude Code - continue";
+      } else if (mode === "resume") {
+        claudeArgs = `--resume ${sessionId}`;
+        title = `Claude Code - resume`;
+      }
+
       const launcher = path.join(DATA_DIR, "launch-claude.cmd");
       const nodeBat = toBatPathSafe(nodeDir(), "%ProgramFiles%\\nodejs");
       const npmBat = toBatPathSafe(npmBinDir(), "%APPDATA%\\npm");
@@ -2798,9 +3217,10 @@ const server = http.createServer(async (req, res) => {
         `@echo off
 setlocal EnableExtensions
 set "PATH=${nodeBat};${npmBat};%PATH%"
-title Claude Code - ${model}
+title ${title}
 echo.
 echo  Model: ${model}
+echo  Mode: ${mode}${mode === "resume" ? ` (${sessionId.slice(0, 8)})` : ""}
 echo  Starting Claude Code...
 echo.
 if not exist "%APPDATA%\\FreeClaude\\freeclaude.bat" (
@@ -2809,20 +3229,21 @@ if not exist "%APPDATA%\\FreeClaude\\freeclaude.bat" (
   pause
   exit /b 1
 )
-call "%APPDATA%\\FreeClaude\\freeclaude.bat"
+call "%APPDATA%\\FreeClaude\\freeclaude.bat" ${claudeArgs}
 if errorlevel 1 pause
 `
       );
 
-      spawn("cmd.exe", ["/c", "start", "Claude Code", "cmd.exe", "/k", launcher], {
+      spawn("cmd.exe", ["/c", "start", title, "cmd.exe", "/k", launcher], {
         detached: true,
         stdio: "ignore",
         windowsHide: false,
-        cwd: DATA_DIR,
+        cwd: launchCwd,
         env: { ...process.env, PATH: `${nodeDir()};${npmBinDir()};${enrichedPath()}` },
       }).unref();
 
-      return send(res, 200, { ok: true, model });
+      appLog.info(`Claude launch mode=${mode} model=${model} cwd=${launchCwd}`);
+      return send(res, 200, { ok: true, model, mode, sessionId: sessionId || null, cwd: launchCwd });
     }
 
     const safeName = u.pathname === "/" ? "index.html" : path.normalize(u.pathname).replace(/^(\.\.[/\\])+/, "").replace(/^[/\\]+/, "");
@@ -2892,6 +3313,8 @@ if errorlevel 1 pause
 });
 
 async function main() {
+  ensureLocalhostNoProxy();
+
   // Seed config from existing settings for current test key (do not wipe)
   if (!readConfig().apiKey) {
     const existing = readToken();
@@ -2908,7 +3331,7 @@ async function main() {
   try {
     const probe = await fetch(`http://127.0.0.1:${PORT}/api/status`, { signal: AbortSignal.timeout(800) });
     if (probe.ok) {
-      console.log("GUI already running:", `http://127.0.0.1:${PORT}`);
+      conSay("ok", st("con.line.gui", { url: `http://127.0.0.1:${PORT}` }));
       openWindow();
       if (IS_PKG) process.exit(0);
       return;
@@ -2919,6 +3342,7 @@ async function main() {
 
   server.listen(PORT, "127.0.0.1", async () => {
     installOmniShutdownHooks();
+    enableAnsiConsole();
     const diskPublicRoot = path.join(EXE_DIR, "public");
     const uiRoot =
       IS_PKG && fs.existsSync(path.join(diskPublicRoot, "index.html")) ? diskPublicRoot : PUBLIC;
@@ -2933,30 +3357,33 @@ async function main() {
     appLog.info(`GUI http://127.0.0.1:${PORT}`);
     appLog.info(`Data ${DATA_DIR}`);
     appLog.info(`UI assets ${uiRoot}`);
-    console.log(`FreeClaude GUI: http://127.0.0.1:${PORT}`);
-    console.log(`UI assets: ${IS_PKG ? (uiRoot === diskPublicRoot ? "disk" : "snapshot") : "dev"} → ${uiRoot}`);
-    console.log(st("con.oneConsole"));
+
+    conSay("info", st("con.line.gui", { url: `http://127.0.0.1:${PORT}` }));
+    conSay("dim", st("con.oneConsole"));
 
     openWindow();
 
     try {
       if (isOmniRouteInstalled()) {
+        conSay("info", st("con.line.omniStart"));
         const ok = await ensureOmni();
         if (ok) {
-          console.log("OmniRoute online");
+          conSay("ok", st("con.line.omniOn"));
           appLog.info("OmniRoute online");
-          console.log(st("con.closeNote"));
+          conSay("dim", st("con.closeNote"));
+          conSay("ok", st("con.line.ready"));
           await autoRepairInstall();
         } else {
-          console.log(st("con.omniOffline"));
+          conSay("warn", st("con.line.omniOff"));
           appLog.warn(st("con.omniOffline"));
         }
       } else {
-        console.log("OmniRoute not installed — open Setup in GUI");
+        conSay("warn", st("con.line.omniOff"));
         appLog.warn("OmniRoute not installed — open Setup in GUI");
       }
     } catch (err) {
-      console.error("OmniRoute bootstrap error:", err && err.message ? err.message : err);
+      conSay("err", st("con.line.omniOff"));
+      appLog.error(`OmniRoute bootstrap error: ${err && err.message ? err.message : err}`);
     }
   });
 }
