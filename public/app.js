@@ -855,6 +855,11 @@ async function awsSignOut() {
   if (els.btnAwsSignOut) els.btnAwsSignOut.disabled = true;
   try {
     reportClientLog("info", "AWS sign-out clicked", "auth");
+    try {
+      window.open("https://view.awsapps.com/start/#/signout", "_blank");
+    } catch {
+      /* ignore */
+    }
     const r = await fetch("/api/kiro/aws-signout", { method: "POST" }).then((x) => x.json());
     if (!r.ok) {
       toast(r.error || t("kiro.awsSignOutFailed"), true);
@@ -1091,24 +1096,27 @@ function setKiroWait(state, title, sub) {
   }
 }
 
-/** Open AWS device auth in a clean browser profile (no saved Builder ID session). */
-async function openAwsWindow(url, { fresh = true } = {}) {
+/** Open AWS device auth in current browser tab. */
+async function openAwsWindow(url, { fresh = false } = {}) {
   if (!url) return false;
+  try {
+    const w = window.open(url, "_blank");
+    if (w) {
+      kiroAuth.awsWin = w;
+      return true;
+    }
+  } catch {
+    /* popup blocked, try server fallback */
+  }
   try {
     const r = await fetch("/api/kiro/open-aws", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, fresh }),
+      body: JSON.stringify({ url, fresh: false }),
     }).then((x) => x.json());
     return Boolean(r.ok);
   } catch {
-    try {
-      const w = window.open(url, "kiro_aws_auth", "popup=yes,width=980,height=820");
-      kiroAuth.awsWin = w;
-      return Boolean(w);
-    } catch {
-      return false;
-    }
+    return false;
   }
 }
 

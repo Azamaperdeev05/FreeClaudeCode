@@ -825,18 +825,18 @@ function openUrlApp(url) {
   return true;
 }
 
-/** Fresh AWS session: ephemeral Chrome/Edge profile so Builder ID cookies are not reused. */
-function openAwsAuthWindow(deviceUrl, { fresh = true } = {}) {
-  const browser = findBrowser();
+/** AWS session: opens in active browser. */
+function openAwsAuthWindow(deviceUrl, { fresh = false } = {}) {
   const target = deviceUrl || AWS_PORTAL_URL;
+  if (!fresh || process.platform === "darwin") {
+    openUrlApp(target);
+    return { ok: true, mode: "browser", url: target };
+  }
+
+  const browser = findBrowser();
   if (!browser) {
     openUrlApp(target);
     return { ok: true, mode: "shell", url: target };
-  }
-
-  if (!fresh) {
-    openUrlApp(target);
-    return { ok: true, mode: "app", url: target };
   }
 
   const profileDir = path.join(os.tmpdir(), `freeclaude-aws-${Date.now()}`);
