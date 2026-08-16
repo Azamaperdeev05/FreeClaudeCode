@@ -11,6 +11,7 @@ const omniKeys = process.pkg ? require("./omni-keys-proxy") : require("./omni-ke
 const { createAxiom } = require("./axiom");
 const { describeUpstreamError } = require("./errors");
 const { kiroStateFromProviders } = require("./kiro-state");
+const { createAppLog } = require("./app-log");
 const i18n = require("./i18n");
 
 const execFileAsync = promisify(execFile);
@@ -31,6 +32,8 @@ const DATA_DIR = (() => {
   }
   return dir;
 })();
+const appLog = createAppLog(DATA_DIR);
+appLog.mirrorConsole();
 const CONFIG = path.join(DATA_DIR, "config.json");
 // Claude Code loads ~/.claude/CLAUDE.md into every session, so the toggle is just this
 // file being present or not. The text itself lives in DATA_DIR and survives switching off.
@@ -1581,7 +1584,7 @@ async function runCmd(command, args, opts = {}) {
       if (!t) return;
       if (t === lastLogged) return;
       lastLogged = t;
-      pushLog(t.length > 2000 ? `${t.slice(0, 2000)}…` : t);
+      pushLog(t);
     };
 
     const timeout = setTimeout(() => {
@@ -1670,8 +1673,15 @@ function requestStopInstall() {
 }
 
 function pushLog(line) {
-  installState.log.push(`[${new Date().toLocaleTimeString()}] ${line}`);
+  const text = String(line == null ? "" : line);
+  installState.log.push(`[${new Date().toLocaleTimeString()}] ${text}`);
   if (installState.log.length > 800) installState.log.shift();
+  // Persistent file keeps every line for the Logs tab / download — no ring trim.
+  try {
+    appLog.info(text);
+  } catch {
+    /* ignore */
+  }
 }
 
 function assertNotCancelled() {
@@ -2224,6 +2234,59 @@ const server = http.createServer(async (req, res) => {
         const lang = i18n.normalizeLang(body.lang);
         writeConfig({ lang });
         return send(res, 200, { ok: true, lang });
+      } catch (err) {
+        return send(res, 500, { ok: false, error: String(err.message || err) });
+      }
+    }
+
+    if (req.method === "GET" && u.pathname === "/api/logs") {
+      const info = appLog.stats();
+      const text = appLog.readAll();
+      return send(res, 200, {
+        ok: true,
+        text,
+        path: info.path,
+        bytes: info.bytes,
+        mtime: info.mtime,
+        lines: text ? text.split(/\r\n|\n|\r/).filter((l) => l.length).length : 0,
+      });
+    }
+
+    if (req.method === "GET" && u.pathname === "/api/logs/download") {
+      const info = appLog.stats();
+      const text = appLog.readAll() || "(empty log)\n";
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const name = `freeclaude-log-${stamp}.txt`;
+      res.writeHead(200, {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Content-Disposition": `attachment; filename="${name}"`,
+        "Cache-Control": "no-store",
+        "X-Log-Path": info.path,
+        "X-Log-Bytes": String(info.bytes || 0),
+      });
+      return res.end(text);
+    }
+
+    if (req.method === "POST" && u.pathname === "/api/logs/client") {
+      try {
+        const body = await readBody(req);
+        const level = String(body.level || "error").toLowerCase();
+        const message = String(body.message || "").slice(0, 100_000);
+        if (!message.trim()) return send(res, 400, { ok: false, error: "empty" });
+        const prefix = body.source ? `[ui:${body.source}] ` : "[ui] ";
+        if (level === "warn") appLog.warn(prefix + message);
+        else if (level === "info") appLog.info(prefix + message);
+        else appLog.error(prefix + message);
+        return send(res, 200, { ok: true });
+      } catch (err) {
+        return send(res, 500, { ok: false, error: String(err.message || err) });
+      }
+    }
+
+    if (req.method === "POST" && u.pathname === "/api/logs/clear") {
+      try {
+        appLog.clear();
+        return send(res, 200, { ok: true, ...appLog.stats() });
       } catch (err) {
         return send(res, 500, { ok: false, error: String(err.message || err) });
       }
@@ -2859,6 +2922,17 @@ async function main() {
     const diskPublicRoot = path.join(EXE_DIR, "public");
     const uiRoot =
       IS_PKG && fs.existsSync(path.join(diskPublicRoot, "index.html")) ? diskPublicRoot : PUBLIC;
+    const ver = (() => {
+      try {
+        return require("./package.json").version;
+      } catch {
+        return "?";
+      }
+    })();
+    appLog.info(`FreeClaude ${ver} starting (pkg=${IS_PKG})`);
+    appLog.info(`GUI http://127.0.0.1:${PORT}`);
+    appLog.info(`Data ${DATA_DIR}`);
+    appLog.info(`UI assets ${uiRoot}`);
     console.log(`FreeClaude GUI: http://127.0.0.1:${PORT}`);
     console.log(`UI assets: ${IS_PKG ? (uiRoot === diskPublicRoot ? "disk" : "snapshot") : "dev"} → ${uiRoot}`);
     console.log(st("con.oneConsole"));
@@ -2870,13 +2944,16 @@ async function main() {
         const ok = await ensureOmni();
         if (ok) {
           console.log("OmniRoute online");
+          appLog.info("OmniRoute online");
           console.log(st("con.closeNote"));
           await autoRepairInstall();
         } else {
           console.log(st("con.omniOffline"));
+          appLog.warn(st("con.omniOffline"));
         }
       } else {
         console.log("OmniRoute not installed — open Setup in GUI");
+        appLog.warn("OmniRoute not installed — open Setup in GUI");
       }
     } catch (err) {
       console.error("OmniRoute bootstrap error:", err && err.message ? err.message : err);

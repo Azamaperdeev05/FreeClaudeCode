@@ -66,6 +66,7 @@ $sources = @(
   "server.js",
   "axiom.js",
   "axiom-default.md",
+  "app-log.js",
   "account-limit.js",
   "bat-path.js",
   "errors.js",

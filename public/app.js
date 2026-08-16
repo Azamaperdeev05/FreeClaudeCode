@@ -70,6 +70,7 @@ const state = {
   limitTimer: null,
   quotaPoll: null,
   setupPoll: null,
+  logsPoll: null,
   tab: "home",
   // Kept so a language switch can repaint server-sourced text without waiting on a refetch.
   lastSetup: null,
@@ -105,6 +106,11 @@ const els = {
   accountMeta: document.getElementById("accountMeta"),
   installLogWrap: document.getElementById("installLogWrap"),
   installLog: document.getElementById("installLog"),
+  appLogView: document.getElementById("appLogView"),
+  logsMeta: document.getElementById("logsMeta"),
+  btnLogsRefresh: document.getElementById("btnLogsRefresh"),
+  btnLogsDownload: document.getElementById("btnLogsDownload"),
+  btnLogsClear: document.getElementById("btnLogsClear"),
   btnInstallAll: document.getElementById("btnInstallAll"),
   btnStopInstall: document.getElementById("btnStopInstall"),
   btnGenKey: document.getElementById("btnGenKey"),
@@ -208,10 +214,102 @@ function toast(msg, isErr = false) {
   els.toast.classList.remove("hidden");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => els.toast.classList.add("hidden"), isErr ? 6500 : 3500);
+  if (isErr) reportClientLog("error", text, "toast");
+}
+
+function reportClientLog(level, message, source) {
+  const text = String(message == null ? "" : message).trim();
+  if (!text) return;
+  fetch("/api/logs/client", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ level, message: text, source: source || "ui" }),
+  }).catch(() => {});
+}
+
+function formatBytes(n) {
+  const v = Number(n) || 0;
+  if (v < 1024) return `${v} B`;
+  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
+  return `${(v / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+async function loadAppLogs({ quiet } = {}) {
+  try {
+    const data = await fetch("/api/logs").then((r) => r.json());
+    if (!data.ok) throw new Error(data.error || t("logs.loadFailed"));
+    const text = data.text || "";
+    if (els.logsMeta) {
+      els.logsMeta.textContent = t("logs.meta", {
+        lines: data.lines || 0,
+        size: formatBytes(data.bytes),
+        path: data.path || "",
+      });
+    }
+    if (els.appLogView) {
+      const nearBottom =
+        els.appLogView.scrollHeight - els.appLogView.scrollTop - els.appLogView.clientHeight < 80;
+      els.appLogView.textContent = text || t("logs.empty");
+      if (nearBottom || !els.appLogView.dataset.touched) {
+        els.appLogView.scrollTop = els.appLogView.scrollHeight;
+      }
+    }
+  } catch (err) {
+    if (!quiet) toast(err.message || t("logs.loadFailed"), true);
+    if (els.appLogView && !els.appLogView.textContent) {
+      els.appLogView.textContent = err.message || t("logs.loadFailed");
+    }
+  }
+}
+
+function ensureLogsPoll() {
+  if (state.logsPoll) return;
+  state.logsPoll = setInterval(() => {
+    if (state.tab !== "logs" || document.hidden) return;
+    loadAppLogs({ quiet: true }).catch(() => {});
+  }, 2000);
+}
+
+function stopLogsPoll() {
+  if (!state.logsPoll) return;
+  clearInterval(state.logsPoll);
+  state.logsPoll = null;
+}
+
+async function downloadAppLogs() {
+  try {
+    const res = await fetch("/api/logs/download");
+    if (!res.ok) throw new Error(t("logs.loadFailed"));
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    a.href = url;
+    a.download = `freeclaude-log-${stamp}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast(t("logs.downloaded"));
+  } catch (err) {
+    toast(err.message || t("logs.loadFailed"), true);
+  }
+}
+
+async function clearAppLogs() {
+  if (!window.confirm(t("logs.clearConfirm"))) return;
+  try {
+    const data = await fetch("/api/logs/clear", { method: "POST" }).then((r) => r.json());
+    if (!data.ok) throw new Error(data.error || t("logs.loadFailed"));
+    toast(t("logs.cleared"));
+    await loadAppLogs({ quiet: true });
+  } catch (err) {
+    toast(err.message || t("logs.loadFailed"), true);
+  }
 }
 
 function setTab(tab) {
-  const allowed = new Set(["home", "models", "setup"]);
+  const allowed = new Set(["home", "models", "setup", "logs"]);
   state.tab = allowed.has(tab) ? tab : "home";
   try {
     localStorage.setItem("fc-tab", state.tab);
@@ -222,14 +320,22 @@ function setTab(tab) {
   const home = document.getElementById("tab-home");
   const models = document.getElementById("tab-models");
   const setup = document.getElementById("tab-setup");
+  const logs = document.getElementById("tab-logs");
   if (home) home.classList.toggle("hidden", state.tab !== "home");
   if (models) models.classList.toggle("hidden", state.tab !== "models");
   if (setup) setup.classList.toggle("hidden", state.tab !== "setup");
+  if (logs) logs.classList.toggle("hidden", state.tab !== "logs");
   if (els.foot) els.foot.classList.toggle("hidden", state.tab !== "models");
   if (state.tab === "setup") {
     loadSetup();
     loadQuota().catch(() => {});
     loadAxiom();
+  }
+  if (state.tab === "logs") {
+    ensureLogsPoll();
+    loadAppLogs().catch(() => {});
+  } else {
+    stopLogsPoll();
   }
 }
 
@@ -1720,6 +1826,14 @@ if (els.langPicker) {
 }
 document.getElementById("btnInstallAll").addEventListener("click", installAll);
 if (els.btnStopInstall) els.btnStopInstall.addEventListener("click", stopInstall);
+if (els.btnLogsRefresh) els.btnLogsRefresh.addEventListener("click", () => loadAppLogs());
+if (els.btnLogsDownload) els.btnLogsDownload.addEventListener("click", () => downloadAppLogs());
+if (els.btnLogsClear) els.btnLogsClear.addEventListener("click", () => clearAppLogs());
+if (els.appLogView) {
+  els.appLogView.addEventListener("scroll", () => {
+    els.appLogView.dataset.touched = "1";
+  });
+}
 if (els.btnLimitSwitch) {
   els.btnLimitSwitch.addEventListener("click", () => {
     setTab("setup");

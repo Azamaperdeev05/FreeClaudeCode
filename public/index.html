@@ -85,6 +85,7 @@
         <button class="nav-btn on" data-tab="home" type="button"><svg class="ic" aria-hidden="true"><use href="#i-home"/></svg><span data-i18n="nav.home">Home</span></button>
         <button class="nav-btn" data-tab="models" type="button"><svg class="ic" aria-hidden="true"><use href="#i-chip"/></svg><span data-i18n="nav.models">Models</span></button>
         <button class="nav-btn" data-tab="setup" type="button"><svg class="ic" aria-hidden="true"><use href="#i-sliders"/></svg><span data-i18n="nav.setup">Settings</span></button>
+        <button class="nav-btn" data-tab="logs" type="button"><svg class="ic" aria-hidden="true"><use href="#i-terminal"/></svg><span data-i18n="nav.logs">Logs</span></button>
       </nav>
       <div class="side-bottom">
         <div class="side-foot" id="sideStatus"><span class="status-ico pending" aria-hidden="true"></span><span id="sideStatusText">—</span></div>
@@ -283,6 +284,22 @@
           </div>
           <pre id="installLog" class="install-log"></pre>
         </div>
+      </section>
+
+      <section class="tab hidden" id="tab-logs">
+        <header class="page-head">
+          <div>
+            <h1><svg class="ic ic-dim" aria-hidden="true"><use href="#i-terminal"/></svg><span data-i18n="logs.title">Logs</span></h1>
+            <p class="page-sub" data-i18n="logs.sub">Full FreeClaude log — nothing trimmed. Download and send it when something breaks.</p>
+          </div>
+          <div class="page-actions logs-actions">
+            <button id="btnLogsRefresh" class="btn ghost" type="button"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg><span data-i18n="logs.refresh">Refresh</span></button>
+            <button id="btnLogsDownload" class="btn accent" type="button"><svg class="ic" aria-hidden="true"><use href="#i-download"/></svg><span data-i18n="logs.download">Download</span></button>
+            <button id="btnLogsClear" class="btn ghost danger" type="button"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg><span data-i18n="logs.clear">Clear</span></button>
+          </div>
+        </header>
+        <div class="logs-meta" id="logsMeta">—</div>
+        <pre id="appLogView" class="app-log-view" aria-live="polite"></pre>
       </section>
 
       <footer class="foot" id="foot"></footer>

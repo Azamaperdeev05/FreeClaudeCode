@@ -24,6 +24,7 @@ const EN = {
   "nav.home": "Home",
   "nav.models": "Models",
   "nav.setup": "Settings",
+  "nav.logs": "Logs",
   "side.creator": "Creator",
   "side.help": "Help",
 
@@ -141,6 +142,18 @@ const EN = {
 
   "log.title": "Install log",
   "log.stop": "Stop",
+  "logs.title": "Logs",
+  "logs.sub": "Full FreeClaude log — nothing trimmed. Download and send it when something breaks.",
+  "logs.refresh": "Refresh",
+  "logs.download": "Download",
+  "logs.clear": "Clear",
+  "logs.empty": "Log is empty so far.",
+  "logs.meta": "{lines} lines · {size} · {path}",
+  "logs.cleared": "Log cleared",
+  "logs.clearConfirm": "Clear the entire log file?",
+  "logs.loadFailed": "Could not load the log",
+  "logs.downloaded": "Log downloaded",
+
 
   "update.title": "Update available",
   "update.text": "Download the new version on Telegram",
@@ -416,6 +429,7 @@ const RU = {
   "nav.home": "Главная",
   "nav.models": "Модели",
   "nav.setup": "Настройки",
+  "nav.logs": "Логи",
   "side.creator": "Создатель",
   "side.help": "Помощь",
 
@@ -533,6 +547,17 @@ const RU = {
 
   "log.title": "Лог установки",
   "log.stop": "Остановить",
+  "logs.title": "Логи",
+  "logs.sub": "Полный лог FreeClaude без урезания. Скачай и пришли, если что-то сломалось.",
+  "logs.refresh": "Обновить",
+  "logs.download": "Скачать",
+  "logs.clear": "Очистить",
+  "logs.empty": "Пока пусто.",
+  "logs.meta": "{lines} строк · {size} · {path}",
+  "logs.cleared": "Лог очищен",
+  "logs.clearConfirm": "Очистить весь файл лога?",
+  "logs.loadFailed": "Не удалось загрузить лог",
+  "logs.downloaded": "Лог скачан",
 
   "update.title": "Вышло обновление",
   "update.text": "Скачайте новую версию в Telegram",
