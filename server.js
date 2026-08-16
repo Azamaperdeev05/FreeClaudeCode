@@ -3297,8 +3297,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       let launchCwd = DATA_DIR;
-      if (cwdRaw && path.isAbsolute(cwdRaw) && fs.existsSync(cwdRaw) && !/["|&<>^%
-]/.test(cwdRaw)) {
+      if (cwdRaw && path.isAbsolute(cwdRaw) && fs.existsSync(cwdRaw) && !/["|&<>^%\r\n]/.test(cwdRaw)) {
         launchCwd = cwdRaw;
       }
 
