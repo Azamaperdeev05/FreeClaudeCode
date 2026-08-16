@@ -930,7 +930,7 @@ async function openKiroAuth() {
       els.kiroModal.setAttribute("aria-hidden", "false");
     }
 
-    await openAwsWindow(kiroAuth.verificationUriComplete, { fresh: true });
+    await openAwsWindow(kiroAuth.verificationUriComplete, { signOutFirst: true });
     setKiroWait("wait");
 
     if (kiroAuth.timer) clearTimeout(kiroAuth.timer);
@@ -1096,14 +1096,33 @@ function setKiroWait(state, title, sub) {
   }
 }
 
-/** Open AWS device auth in current browser tab. */
-async function openAwsWindow(url, { fresh = false } = {}) {
+const AWS_SIGNOUT_URL = "https://view.awsapps.com/start/#/signout";
+
+/** Open AWS device auth in current browser tab, signing out first to clear old cookies. */
+async function openAwsWindow(url, { signOutFirst = true } = {}) {
   if (!url) return false;
   try {
-    const w = window.open(url, "_blank");
-    if (w) {
-      kiroAuth.awsWin = w;
-      return true;
+    if (signOutFirst) {
+      // Step 1: Open signout to purge cookies in the active browser tab
+      const w = window.open(AWS_SIGNOUT_URL, "_blank");
+      if (w) {
+        kiroAuth.awsWin = w;
+        // Step 2: After allowing AWS to clear session tokens, redirect to device auth
+        setTimeout(() => {
+          try {
+            w.location.href = url;
+          } catch {
+            window.open(url, "_blank");
+          }
+        }, 1200);
+        return true;
+      }
+    } else {
+      const w = window.open(url, "_blank");
+      if (w) {
+        kiroAuth.awsWin = w;
+        return true;
+      }
     }
   } catch {
     /* popup blocked, try server fallback */
@@ -1999,7 +2018,7 @@ if (els.btnKiroCopy) els.btnKiroCopy.addEventListener("click", copyKiroCode);
 if (els.btnKiroOpenAws) {
   els.btnKiroOpenAws.addEventListener("click", async () => {
     if (!kiroAuth.verificationUriComplete) return;
-    const ok = await openAwsWindow(kiroAuth.verificationUriComplete, { fresh: true });
+    const ok = await openAwsWindow(kiroAuth.verificationUriComplete, { signOutFirst: true });
     if (!ok) {
       toast(t("kiro.awsOpenFailed"), true);
       return;
