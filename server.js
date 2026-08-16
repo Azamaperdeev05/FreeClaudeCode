@@ -1,4 +1,5 @@
 const http = require("http");
+const net = require("net");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
@@ -16,6 +17,7 @@ const execFileAsync = promisify(execFile);
 
 const PORT = 3847;
 const OMNI = "http://127.0.0.1:20128";
+const OMNI_PORT = 20128;
 const SETTINGS = path.join(process.env.USERPROFILE || os.homedir(), ".claude", "settings.json");
 const PROFILE_DIR = path.join(process.env.USERPROFILE || os.homedir(), ".claude", "profiles", "active-freeclaude");
 const IS_PKG = Boolean(process.pkg);
@@ -318,8 +320,63 @@ function runOmniPasswordReset(password) {
 
 async function restartOmniRoute() {
   killOmniRouteListeners();
-  await sleep(1500);
-  return ensureOmni(60000);
+  const free = await waitForOmniPortFree(20000);
+  if (!free) {
+    // Last try: kill again and wait a bit more before giving ensureOmni a shot.
+    killOmniRouteListeners();
+    await waitForOmniPortFree(10000);
+  }
+  let up = await ensureOmni(90000, { forceStart: true });
+  if (!up) {
+    killOmniRouteListeners();
+    await waitForOmniPortFree(15000);
+    up = await ensureOmni(90000, { forceStart: true });
+  }
+  return up;
+}
+
+/** True when something already accepts TCP on OmniRoute's port (even if /health is dead). */
+function isOmniPortBusy() {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: "127.0.0.1", port: OMNI_PORT });
+    const done = (busy) => {
+      try {
+        socket.destroy();
+      } catch {
+        /* ignore */
+      }
+      resolve(busy);
+    };
+    socket.setTimeout(800);
+    socket.once("connect", () => done(true));
+    socket.once("timeout", () => done(true));
+    socket.once("error", () => done(false));
+  });
+}
+
+/** Probe by binding: if we can listen, the port is free. */
+function canBindOmniPort() {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once("error", () => resolve(false));
+    server.once("listening", () => {
+      server.close(() => resolve(true));
+    });
+    try {
+      server.listen(OMNI_PORT, "127.0.0.1");
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+async function waitForOmniPortFree(timeoutMs = 20000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (await canBindOmniPort()) return true;
+    await sleep(400);
+  }
+  return canBindOmniPort();
 }
 
 // One attempt per run: if the reset itself cannot fix the login, retrying on every click
@@ -657,9 +714,9 @@ async function finalizeKiroAuth() {
   } catch {
     /* ignore */
   }
-  // OmniRoute keeps 402/429 exhaustion in RAM; DB cleans alone leave every new
-  // Builder ID looking limited until the process is recycled.
-  const omniRestarted = await restartOmniRoute().catch(() => false);
+  // Quota cache was wiped by the logout restart; do not kill OmniRoute again here —
+  // a second restart raced the fresh OAuth write and left :20128 occupied/dead.
+  await nudgeOmniCaches().catch(() => false);
   invalidateKiroHttpCache();
   const finalState = await resolveKiroConnected({ maxAgeMs: 0 });
   connected = finalState.connected;
@@ -672,7 +729,6 @@ async function finalizeKiroAuth() {
     modelsCount,
     healed,
     repaired,
-    omniRestarted: Boolean(omniRestarted),
     waitedMs: Date.now() - started,
   };
 }
@@ -941,22 +997,23 @@ let omniStopping = false;
 let omniOwned = false; // true if FreeClaude should kill :20128 on exit
 
 function killOmniRouteListeners() {
-  // Убиваем процесс, который мы запустили, со всем деревом
-  if (omniChild && omniChild.pid) {
+  // Drop our handle first so startOmniRoute will not think the child is still alive.
+  const previous = omniChild;
+  omniChild = null;
+  if (previous && previous.pid) {
     try {
-      spawnSync("taskkill", ["/PID", String(omniChild.pid), "/T", "/F"], {
+      spawnSync("taskkill", ["/PID", String(previous.pid), "/T", "/F"], {
         windowsHide: true,
         stdio: "ignore",
         timeout: 8000,
       });
     } catch {
       try {
-        omniChild.kill();
+        previous.kill();
       } catch {
         /* ignore */
       }
     }
-    omniChild = null;
   }
 
   // Всегда добиваем слушателей :20128 и node/omniroute serve — иначе сироты жрут CPU/лагает мышь
@@ -967,7 +1024,7 @@ function killOmniRouteListeners() {
       "$ErrorActionPreference='SilentlyContinue'",
       `$self = ${process.pid}`,
       "$pids = @()",
-      "Get-NetTCPConnection -LocalPort 20128 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { $pids += $_.OwningProcess }",
+      `Get-NetTCPConnection -LocalPort ${OMNI_PORT} -State Listen -ErrorAction SilentlyContinue | ForEach-Object { $pids += $_.OwningProcess }`,
       "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {",
       "  ($_.Name -match '^(node|omniroute)') -and ($_.CommandLine -match 'omniroute')",
       "} | ForEach-Object { $pids += $_.ProcessId }",
@@ -993,7 +1050,7 @@ function killOmniRouteListeners() {
       [
         "/d",
         "/c",
-        'for /f "tokens=5" %a in (\'netstat -ano ^| findstr :20128 ^| findstr LISTENING\') do taskkill /F /PID %a >nul 2>&1',
+        `for /f "tokens=5" %a in ('netstat -ano ^| findstr :${OMNI_PORT} ^| findstr LISTENING') do taskkill /F /PID %a >nul 2>&1`,
       ],
       { windowsHide: true, stdio: "ignore", timeout: 8000 }
     );
@@ -1120,10 +1177,10 @@ function installOmniShutdownHooks() {
   }
 }
 
-function startOmniRoute() {
+function startOmniRoute(opts = {}) {
   const mjs = omniModuleEntry();
   const omniCmd = omniCmdPath();
-  if (!whichExists(mjs) && !whichExists(omniCmd)) return;
+  if (!whichExists(mjs) && !whichExists(omniCmd)) return false;
 
   const env = {
     ...process.env,
@@ -1133,9 +1190,11 @@ function startOmniRoute() {
   // OmniRoute — дочерний процесс FreeClaude (не detached-сирота).
   // При закрытии FreeClaude убиваем OmniRoute.
   try {
-    if (omniChild && omniChild.exitCode == null) {
-      return;
+    if (!opts.force && omniChild && omniChild.exitCode == null) {
+      return false;
     }
+    // After a forced restart the previous handle must not block a new spawn.
+    if (opts.force) omniChild = null;
 
     installOmniShutdownHooks();
 
@@ -1172,8 +1231,10 @@ function startOmniRoute() {
       if (omniChild === child) omniChild = null;
       console.log(`OmniRoute stopped (code ${code})`);
     });
+    return true;
   } catch (err) {
     console.error("OmniRoute start failed:", err && err.message ? err.message : err);
+    return false;
   }
 }
 
@@ -1187,11 +1248,20 @@ async function ensureOmni(timeoutMs = 90000, opts = {}) {
       return true;
     }
     if (!isOmniRouteInstalled()) return false;
+
+    // Port occupied by a dead/half-booted OmniRoute: health fails forever until we free it.
+    if (await isOmniPortBusy()) {
+      if (opts.liveLog) pushLog(st("log.omniPortBusy"));
+      killOmniRouteListeners();
+      await waitForOmniPortFree(15000);
+    }
+
     if (opts.liveLog) pushLog(st("log.omniStarting"));
-    startOmniRoute();
+    startOmniRoute({ force: Boolean(opts.forceStart) });
     omniOwned = true;
     const start = Date.now();
     let lastBeat = 0;
+    let retriedSpawn = false;
     while (Date.now() - start < timeoutMs) {
       if (opts.checkCancel && installState.cancelRequested) {
         if (opts.liveLog) pushLog(st("log.omniWaitCancelled"));
@@ -1201,6 +1271,14 @@ async function ensureOmni(timeoutMs = 90000, opts = {}) {
       if (await isOmniUp()) {
         if (opts.liveLog) pushLog(st("log.omniOnlineIn", { sec: Math.round((Date.now() - start) / 1000) }));
         return true;
+      }
+      // Spawn died or never became healthy: free the port and try once more mid-wait.
+      if (!retriedSpawn && Date.now() - start > 8000 && !(await isOmniUp())) {
+        retriedSpawn = true;
+        if (opts.liveLog) pushLog(st("log.omniRetryStart"));
+        killOmniRouteListeners();
+        await waitForOmniPortFree(10000);
+        startOmniRoute({ force: true });
       }
       if (opts.liveLog) {
         const sec = Math.round((Date.now() - start) / 1000);
@@ -1242,7 +1320,7 @@ function assertSafePath(value, label) {
 }
 
 /**
- * cmd.exe treats a UTF-8 BOM as garbage on the first line (`я╗┐@echo`), so batch
+ * cmd.exe treats a UTF-8 BOM as garbage on the first line (mojibake before @echo), so batch
  * files must be plain ASCII. Non-ASCII absolute paths are rewritten to %APPDATA%
  * / %USERPROFILE% / %ProgramFiles% in writeBat() via bat-path.js — never embed them.
  */
@@ -1267,7 +1345,7 @@ function writeCmdFile(file, body) {
  *
  * Absolute paths with Cyrillic usernames break cmd.exe — bake
  * %APPDATA% / %USERPROFILE% / %ProgramFiles% instead (see bat-path.js) and write
- * the .bat as plain UTF-8 without a BOM (a BOM makes cmd run `я╗┐@echo`).
+ * the .bat as plain UTF-8 without a BOM (a BOM makes cmd treat @echo as garbage).
  *
  * Claude itself is checked at launch time, not here: writeSettings also runs when the
  * user only has a key and has not installed Claude Code yet.
