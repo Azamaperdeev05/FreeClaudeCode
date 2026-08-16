@@ -2565,10 +2565,33 @@ function mime(file) {
 }
 
 function findBrowser() {
+  if (process.platform === "darwin") {
+    const macCandidates = [
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+      "/Applications/Chromium.app/Contents/MacOS/Chromium",
+      path.join(os.homedir(), "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+    ];
+    return macCandidates.find((p) => fs.existsSync(p)) || null;
+  }
+  if (process.platform === "linux") {
+    const linuxCandidates = [
+      "/usr/bin/google-chrome",
+      "/usr/bin/google-chrome-stable",
+      "/usr/bin/chromium",
+      "/usr/bin/chromium-browser",
+      "/usr/bin/brave-browser",
+      "/usr/bin/microsoft-edge",
+    ];
+    return linuxCandidates.find((p) => fs.existsSync(p)) || null;
+  }
   const candidates = [
     path.join(process.env.ProgramFiles || "", "Google\\Chrome\\Application\\chrome.exe"),
     path.join(process.env.ProgramFiles || "", "Microsoft\\Edge\\Application\\msedge.exe"),
     path.join(process.env["ProgramFiles(x86)"] || "", "Microsoft\\Edge\\Application\\msedge.exe"),
+    path.join(process.env.LOCALAPPDATA || "", "Google\\Chrome\\Application\\chrome.exe"),
+    path.join(process.env.LOCALAPPDATA || "", "Programs\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"),
   ];
   return candidates.find((p) => fs.existsSync(p)) || null;
 }
@@ -2581,6 +2604,10 @@ function shouldOpenBrowser() {
 function openWindow() {
   if (!shouldOpenBrowser()) return;
   const url = `http://127.0.0.1:${PORT}`;
+  if (process.platform === "darwin") {
+    spawn("open", [url], { detached: true, stdio: "ignore" }).unref();
+    return;
+  }
   const sys = process.env.SystemRoot || "C:\\Windows";
   const logPath = path.join(DATA_DIR, "open-ui.log");
   const log = (msg) => {
