@@ -403,44 +403,64 @@ function getKeyUsage(apiKey) {
   }
 }
 
+function tableExists(db, name) {
+  try {
+    const row = db
+      .prepare(`SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1`)
+      .get(name);
+    return Boolean(row);
+  } catch {
+    return false;
+  }
+}
+
+/** OmniRoute rehydrates the in-memory quota cache from these rows after a restart. */
+function deleteQuotaSnapshotsForIds(db, ids) {
+  if (!ids.length || !tableExists(db, "quota_snapshots")) return 0;
+  const placeholders = ids.map(() => "?").join(",");
+  const result = db
+    .prepare(`DELETE FROM quota_snapshots WHERE connection_id IN (${placeholders})`)
+    .run(...ids);
+  return Number(result.changes || 0);
+}
+
+/**
+ * Drop Kiro sessions so a fresh Builder ID cannot inherit the previous account's
+ * 402/429 state. Soft-clear alone is not enough: OmniRoute keeps an in-memory
+ * quota cache and persists exhausted windows in `quota_snapshots`, keyed by
+ * connection id — OAuth often reuses that same row.
+ */
 function logoutKiro(connectionId = null) {
   const db = getDb(false);
   try {
-    const now = new Date().toISOString();
-    const baseAssignments = {
-      is_active: 0,
-      access_token: null,
-      refresh_token: null,
-      id_token: null,
-      api_key: null,
-      test_status: "disconnected",
-      last_error: "logged out from FreeClaude",
-      last_error_at: now,
-      rate_limited_until: null,
-      updated_at: now,
-    };
-
     if (connectionId) {
-      const info = db.prepare(`SELECT id FROM provider_connections WHERE id = ? AND provider IN ('kiro','kr')`).get(connectionId);
+      const info = db
+        .prepare(`SELECT id FROM provider_connections WHERE id = ? AND provider IN ('kiro','kr')`)
+        .get(connectionId);
       if (!info) throw new Error("Kiro-соединение не найдено");
-      const { set, values } = buildUpdateSet(db, "provider_connections", baseAssignments);
-      db.prepare(`UPDATE provider_connections SET ${set} WHERE id = ?`).run(...values, connectionId);
-      return { ok: true, removed: 1, id: connectionId };
+      const snapshots = deleteQuotaSnapshotsForIds(db, [connectionId]);
+      const del = db.prepare(`DELETE FROM provider_connections WHERE id = ?`).run(connectionId);
+      return {
+        ok: true,
+        removed: Number(del.changes || 0),
+        id: connectionId,
+        snapshotsCleared: snapshots,
+        purged: true,
+      };
     }
 
-    // Гасим ВСЕ Kiro/kr записи, не только is_active=1 (иначе «хвосты» остаются активными)
-    const before = db
-      .prepare(
-        `SELECT COUNT(*) as c FROM provider_connections
-         WHERE provider IN ('kiro','kr')
-           AND (is_active = 1 OR access_token IS NOT NULL OR refresh_token IS NOT NULL OR api_key IS NOT NULL)`
-      )
-      .get();
-
-    const { set, values } = buildUpdateSet(db, "provider_connections", baseAssignments);
-    const result = db.prepare(`UPDATE provider_connections SET ${set} WHERE provider IN ('kiro','kr')`).run(...values);
-
-    return { ok: true, removed: Math.max(result.changes, Number(before?.c || 0)) };
+    const rows = db
+      .prepare(`SELECT id FROM provider_connections WHERE provider IN ('kiro','kr')`)
+      .all();
+    const ids = rows.map((r) => r.id).filter(Boolean);
+    const snapshots = deleteQuotaSnapshotsForIds(db, ids);
+    const del = db.prepare(`DELETE FROM provider_connections WHERE provider IN ('kiro','kr')`).run();
+    return {
+      ok: true,
+      removed: Number(del.changes || 0),
+      snapshotsCleared: snapshots,
+      purged: true,
+    };
   } finally {
     db.close();
   }
@@ -493,6 +513,17 @@ function clearKiroCooldowns() {
   try {
     const cols = new Set(tableColumns(db, "provider_connections"));
     const now = new Date().toISOString();
+    const activeIds = db
+      .prepare(
+        `SELECT id FROM provider_connections
+         WHERE provider IN ('kiro','kr')
+           AND (is_active = 1 OR is_active IS NULL)`
+      )
+      .all()
+      .map((r) => r.id)
+      .filter(Boolean);
+    const snapshotsCleared = deleteQuotaSnapshotsForIds(db, activeIds);
+
     const setParts = [];
     if (cols.has("rate_limited_until")) setParts.push("rate_limited_until = NULL");
     if (cols.has("backoff_level")) setParts.push("backoff_level = 0");
@@ -508,7 +539,9 @@ function clearKiroCooldowns() {
       );
     }
     if (cols.has("updated_at")) setParts.push("updated_at = ?");
-    if (!setParts.length) return { ok: true, cleared: 0 };
+    if (!setParts.length) {
+      return { ok: true, cleared: 0, snapshotsCleared };
+    }
 
     const where = ["provider IN ('kiro','kr')"];
     if (cols.has("is_active")) where.push("is_active = 1");
@@ -520,7 +553,11 @@ function clearKiroCooldowns() {
     const result = db
       .prepare(`UPDATE provider_connections SET ${setParts.join(", ")} WHERE ${where.join(" AND ")}`)
       .run(...values);
-    return { ok: true, cleared: Number(result.changes || 0) };
+    return {
+      ok: true,
+      cleared: Number(result.changes || 0),
+      snapshotsCleared,
+    };
   } finally {
     db.close();
   }

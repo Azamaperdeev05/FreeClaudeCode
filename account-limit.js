@@ -92,9 +92,16 @@ function summarizeAccountLimits(kiro, { minLimitMs = MIN_LIMIT_MS } = {}) {
     (Boolean(k.cooling) && Number(k.coolLeftMs || 0) >= minLimitMs);
 
   const usable = active.filter((k) => {
-    if (k.state === "banned" || k.state === "expired") return false;
-    if (seriousLimited(k) && Number(k.coolLeftMs || 0) >= minLimitMs) return false;
-    if (k.state === "quota") return false;
+    if (k.state === "banned" || k.state === "expired" || k.state === "quota") return false;
+    // rate_limited without a long cooldown still counts as not usable for routing UI
+    if (k.state === "limited") {
+      const left = Number(k.coolLeftMs || 0);
+      // No timestamp → treat as soft; only lock when the wait is real.
+      if (left >= minLimitMs) return false;
+      if (left > 0 && left < minLimitMs) return true;
+      return k.cooling ? false : true;
+    }
+    if (Boolean(k.cooling) && Number(k.coolLeftMs || 0) >= minLimitMs) return false;
     return true;
   });
 

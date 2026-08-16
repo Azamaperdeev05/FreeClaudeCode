@@ -657,8 +657,9 @@ async function finalizeKiroAuth() {
   } catch {
     /* ignore */
   }
-  await nudgeOmniCaches().catch(() => false);
-
+  // OmniRoute keeps 402/429 exhaustion in RAM; DB cleans alone leave every new
+  // Builder ID looking limited until the process is recycled.
+  const omniRestarted = await restartOmniRoute().catch(() => false);
   invalidateKiroHttpCache();
   const finalState = await resolveKiroConnected({ maxAgeMs: 0 });
   connected = finalState.connected;
@@ -671,6 +672,7 @@ async function finalizeKiroAuth() {
     modelsCount,
     healed,
     repaired,
+    omniRestarted: Boolean(omniRestarted),
     waitedMs: Date.now() - started,
   };
 }
@@ -2313,9 +2315,9 @@ const server = http.createServer(async (req, res) => {
             error: String(err.message || err),
           };
         }
-        // soonestRetryAfterMs у OmniRoute бывает от старых Kiro-сессий —
-        // применяем только если активный аккаунт реально в лимите
-        if (soonest > 0 && account.limited) {
+        // soonestRetryAfterMs mixes every historical Kiro row in OmniRoute RAM.
+        // Never let it invent a limit when SQLite says the live account is fine.
+        if (soonest > 0 && account.limited && !account.banned) {
           const soonestAt = Date.now() + soonest;
           if (!account.resetAt || soonestAt > account.resetAt) {
             account.resetAt = soonestAt;
@@ -2324,6 +2326,10 @@ const server = http.createServer(async (req, res) => {
           }
         } else if (account.resetInMs > 0 && !account.resetAt) {
           account.resetAt = Date.now() + account.resetInMs;
+        } else if (!account.limited) {
+          account.resetAt = null;
+          account.resetInMs = 0;
+          account.resetInText = null;
         }
         return send(res, 200, {
           activeKey: usage.masked || maskToken(token),
@@ -2404,14 +2410,21 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && u.pathname === "/api/kiro/aws-signout") {
       // Выход из AWS Access Portal в чистом окне (сессия Builder ID)
-      omniKeys.logoutKiro(null);
+      let purged = null;
+      try {
+        purged = omniKeys.logoutKiro(null);
+      } catch {
+        purged = null;
+      }
       invalidateKiroHttpCache();
-      await nudgeOmniCaches().catch(() => false);
+      const omniRestarted = await restartOmniRoute().catch(() => false);
       const opened = openAwsSignOut();
       return send(res, 200, {
         ok: true,
         message: st("srv.awsSignOutOpened"),
         telegram: TELEGRAM_URL,
+        purged,
+        omniRestarted: Boolean(omniRestarted),
         ...opened,
       });
     }
@@ -2421,8 +2434,14 @@ const server = http.createServer(async (req, res) => {
         const body = await readBody(req);
         const result = omniKeys.logoutKiro(body.id || null);
         invalidateKiroHttpCache();
-        await nudgeOmniCaches().catch(() => false);
-        return send(res, 200, { ok: true, ...result });
+        // Drop OmniRoute's in-memory "all accounts exhausted" cache so the next
+        // Builder ID is not sticky-limited for ~5 minutes.
+        const omniRestarted = await restartOmniRoute().catch(() => false);
+        return send(res, 200, {
+          ok: true,
+          ...result,
+          omniRestarted: Boolean(omniRestarted),
+        });
       } catch (err) {
         return send(res, 500, { ok: false, error: String(err.message || err) });
       }
