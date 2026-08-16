@@ -1241,10 +1241,23 @@ function assertSafePath(value, label) {
   return p;
 }
 
-/** cmd.exe misreads UTF-8 without a BOM when the path contains Cyrillic usernames. */
+/**
+ * cmd.exe treats a UTF-8 BOM as garbage on the first line (`я╗┐@echo`), so batch
+ * files must be plain ASCII. Non-ASCII absolute paths are rewritten to %APPDATA%
+ * / %USERPROFILE% / %ProgramFiles% in writeBat() via bat-path.js — never embed them.
+ */
 function writeCmdFile(file, body) {
+  const text = String(body || "").replace(/^\uFEFF/, "");
+  if (/[^\x00-\x7F]/.test(text)) {
+    throw new Error(
+      st("srv.badPath", {
+        label: " (batch)",
+        path: "non-ASCII in .cmd — use %APPDATA% paths",
+      })
+    );
+  }
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `\uFEFF${body.replace(/^\uFEFF/, "")}`, "utf8");
+  fs.writeFileSync(file, text, "utf8");
 }
 
 /**
@@ -1252,8 +1265,9 @@ function writeCmdFile(file, body) {
  * "path not found" on machines where the nested .bat path or claude.cmd lookup broke
  * (Cyrillic usernames, missing PATH after the omniroute shim, etc.).
  *
- * Absolute paths with Cyrillic usernames break cmd.exe even with UTF-8 BOM — bake
- * %APPDATA% / %USERPROFILE% / %ProgramFiles% instead (see bat-path.js).
+ * Absolute paths with Cyrillic usernames break cmd.exe — bake
+ * %APPDATA% / %USERPROFILE% / %ProgramFiles% instead (see bat-path.js) and write
+ * the .bat as plain UTF-8 without a BOM (a BOM makes cmd run `я╗┐@echo`).
  *
  * Claude itself is checked at launch time, not here: writeSettings also runs when the
  * user only has a key and has not installed Claude Code yet.

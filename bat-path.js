@@ -5,8 +5,9 @@ const os = require("os");
 
 /**
  * cmd.exe often breaks on absolute paths that contain Cyrillic (or other non-ASCII)
- * characters, even when the .bat is UTF-8 with a BOM. Expanding %APPDATA% /
+ * characters. Expanding %APPDATA% /
  * %USERPROFILE% at runtime avoids embedding those characters in the script at all.
+ * Do not add a UTF-8 BOM to the .bat — cmd.exe then fails on `@echo off`.
  */
 function batPathRoots(env = process.env) {
   return [
