@@ -55,6 +55,7 @@ scenario("Russian entries are actually translated", () => {
     "setup.ok",
     "account.ok",
     "log.omniOnline",
+    "proxy.placeholder",
   ]);
   const suspicious = Object.keys(EN).filter(
     (k) => !sameOnPurpose.has(k) && EN[k] === RU[k]

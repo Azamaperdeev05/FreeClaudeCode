@@ -152,6 +152,8 @@ const els = {
   langPicker: document.getElementById("langPicker"),
   btnDoctor: document.getElementById("btnDoctor"),
   doctorResult: document.getElementById("doctorResult"),
+  httpProxy: document.getElementById("httpProxy"),
+  btnSaveProxy: document.getElementById("btnSaveProxy"),
 };
 
 let toastTimer = null;
@@ -1089,6 +1091,9 @@ function setKiroWait(state, title, sub) {
     if (state === "error" && (sub || title)) {
       els.kiroWaitSub.textContent = sub || title;
       els.kiroWaitSub.classList.remove("hidden");
+    } else if (state === "wait") {
+      els.kiroWaitSub.textContent = t("kiro.browserHint");
+      els.kiroWaitSub.classList.remove("hidden");
     } else {
       els.kiroWaitSub.textContent = "";
       els.kiroWaitSub.classList.add("hidden");
@@ -1098,7 +1103,7 @@ function setKiroWait(state, title, sub) {
 
 const AWS_SIGNOUT_URL = "https://view.awsapps.com/start/#/signout";
 
-/** Open AWS device auth in current browser tab, signing out first to clear old cookies. */
+/** Open AWS device auth in the OS default browser (signs out first to clear old cookies). */
 async function openAwsWindow(url, { signOutFirst = true } = {}) {
   if (!url) return false;
   try {
@@ -1131,11 +1136,17 @@ async function openAwsWindow(url, { signOutFirst = true } = {}) {
     const r = await fetch("/api/kiro/open-aws", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, fresh: false }),
+      body: JSON.stringify({ url }),
     }).then((x) => x.json());
     return Boolean(r.ok);
   } catch {
-    return false;
+    try {
+      const w = window.open(url, "_blank", "noopener");
+      kiroAuth.awsWin = w;
+      return Boolean(w);
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -1403,7 +1414,28 @@ function render() {
 async function loadSetup() {
   const setup = await fetch("/api/setup").then((r) => r.json());
   renderSetup(setup);
+  if (els.httpProxy && setup.httpProxy != null) els.httpProxy.value = setup.httpProxy;
   return setup;
+}
+
+async function saveProxy() {
+  const httpProxy = String(els.httpProxy?.value || "").trim();
+  const btn = els.btnSaveProxy;
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/proxy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ httpProxy }),
+    }).then((x) => x.json());
+    if (!r.ok) throw new Error(r.error || t("toast.error"));
+    if (els.httpProxy) els.httpProxy.value = r.httpProxy || "";
+    toast(r.httpProxy ? t("proxy.saved") : t("proxy.cleared"));
+  } catch (e) {
+    toast(String(e.message || e), true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 function formatKb(bytes) {
@@ -2036,6 +2068,12 @@ if (els.btnKiroRetry) {
   });
 }
 if (els.btnDoctor) els.btnDoctor.addEventListener("click", runDoctorCheck);
+if (els.btnSaveProxy) els.btnSaveProxy.addEventListener("click", () => saveProxy());
+if (els.httpProxy) {
+  els.httpProxy.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") saveProxy();
+  });
+}
 if (els.langPicker) {
   els.langPicker.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-lang]");
