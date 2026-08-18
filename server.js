@@ -797,21 +797,6 @@ function clearKiroOAuthSession() {
 function openDefaultBrowser(url) {
   const target = String(url || "").trim();
   if (!target) return false;
-  const sys = process.env.SystemRoot || "C:\\Windows";
-  const rundll = path.join(sys, "System32", "rundll32.exe");
-  try {
-    const child = spawn(rundll, ["url.dll,FileProtocolHandler", target], {
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true,
-    });
-    child.on("error", () => {});
-    child.unref();
-    return true;
-  } catch {
-    /* fall through */
-  }
-  try {
   if (process.platform === "darwin") {
     try {
       const child = spawn("open", [target], { detached: true, stdio: "ignore" });
@@ -831,6 +816,20 @@ function openDefaultBrowser(url) {
     } catch {
       return false;
     }
+  }
+  const sys = process.env.SystemRoot || "C:\\Windows";
+  const rundll = path.join(sys, "System32", "rundll32.exe");
+  try {
+    const child = spawn(rundll, ["url.dll,FileProtocolHandler", target], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    child.on("error", () => {});
+    child.unref();
+    return true;
+  } catch {
+    /* fall through */
   }
   try {
     const child = spawn(
