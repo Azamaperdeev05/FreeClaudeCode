@@ -764,88 +764,55 @@ function clearKiroOAuthSession() {
   kiroOAuth.verificationUriComplete = null;
 }
 
-function openUrlApp(url) {
-  const browser = findBrowser();
-  if (browser) {
-    try {
-      const child = spawn(browser, [`--app=${url}`, "--new-window", "--window-size=980,820"], {
-        detached: true,
-        stdio: "ignore",
-      });
-      child.on("error", () => {});
-      child.unref();
-      return true;
-    } catch {
-      /* fall through */
-    }
+/**
+ * Open the OS default browser (profile, VPN extensions, proxy). Chrome `--app` + a
+ * throwaway `--user-data-dir` skipped those, so AWS Builder ID often failed in CIS.
+ */
+function openDefaultBrowser(url) {
+  const target = String(url || "").trim();
+  if (!target) return false;
+  const sys = process.env.SystemRoot || "C:\\Windows";
+  const rundll = path.join(sys, "System32", "rundll32.exe");
+  try {
+    const child = spawn(rundll, ["url.dll,FileProtocolHandler", target], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    child.on("error", () => {});
+    child.unref();
+    return true;
+  } catch {
+    /* fall through */
   }
   try {
     const child = spawn(
       process.env.ComSpec || "cmd.exe",
-      ["/c", "start", "", url],
+      ["/c", "start", "", target],
       { detached: true, stdio: "ignore", windowsHide: true }
     );
     child.on("error", () => {});
     child.unref();
+    return true;
   } catch (err) {
-    console.error("openUrlApp failed:", err && err.message ? err.message : err);
+    console.error("openDefaultBrowser failed:", err && err.message ? err.message : err);
+    return false;
   }
-  return true;
 }
 
-/** Fresh AWS session: ephemeral Chrome/Edge profile so Builder ID cookies are not reused. */
-function openAwsAuthWindow(deviceUrl, { fresh = true } = {}) {
-  const browser = findBrowser();
+function openUrlApp(url) {
+  return openDefaultBrowser(url);
+}
+
+/** Same as Kiro/OmniRoute: device URL in the user's normal browser, not an app window. */
+function openAwsAuthWindow(deviceUrl) {
   const target = deviceUrl || AWS_PORTAL_URL;
-  if (!browser) {
-    openUrlApp(target);
-    return { ok: true, mode: "shell", url: target };
-  }
-
-  if (!fresh) {
-    openUrlApp(target);
-    return { ok: true, mode: "app", url: target };
-  }
-
-  const profileDir = path.join(os.tmpdir(), `freeclaude-aws-${Date.now()}`);
-  fs.mkdirSync(profileDir, { recursive: true });
-  spawn(
-    browser,
-    [
-      `--user-data-dir=${profileDir}`,
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--disable-features=Translate",
-      `--app=${target}`,
-      "--window-size=980,820",
-    ],
-    { detached: true, stdio: "ignore" }
-  ).unref();
-
-  // Best-effort cleanup of old ephemeral profiles (older than 2 days)
-  try {
-    const tmp = os.tmpdir();
-    for (const name of fs.readdirSync(tmp)) {
-      if (!name.startsWith("freeclaude-aws-")) continue;
-      const full = path.join(tmp, name);
-      try {
-        const st = fs.statSync(full);
-        if (Date.now() - st.mtimeMs > 2 * 24 * 60 * 60 * 1000) {
-          fs.rmSync(full, { recursive: true, force: true });
-        }
-      } catch {
-        /* ignore */
-      }
-    }
-  } catch {
-    /* ignore */
-  }
-
-  return { ok: true, mode: "fresh-profile", url: target, profileDir };
+  const opened = openDefaultBrowser(target);
+  return { ok: opened, mode: "default-browser", url: target };
 }
 
 function openAwsSignOut() {
-  return openAwsAuthWindow(AWS_SIGNOUT_URL, { fresh: true });
+  return openAwsAuthWindow(AWS_SIGNOUT_URL);
 }
 
 function sleep(ms) {
@@ -1146,13 +1113,32 @@ function ensureLocalhostNoProxy() {
   }
 }
 
+function readHttpProxy() {
+  return String(readConfig().httpProxy || "").trim();
+}
+
+function normalizeHttpProxy(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  let u;
+  try {
+    u = new URL(s);
+  } catch {
+    throw new Error(st("proxy.badUrl"));
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error(st("proxy.badUrl"));
+  if (!u.hostname) throw new Error(st("proxy.badUrl"));
+  return u.href.replace(/\/$/, "");
+}
+
 function omniChildEnv() {
   ensureLocalhostNoProxy();
+  const loopback = "127.0.0.1,localhost,::1";
   const env = {
     ...process.env,
     PATH: `${nodeDir()};${npmBinDir()};${enrichedPath()}`,
-    NO_PROXY: process.env.NO_PROXY || "127.0.0.1,localhost,::1",
-    no_proxy: process.env.no_proxy || process.env.NO_PROXY || "127.0.0.1,localhost,::1",
+    NO_PROXY: process.env.NO_PROXY || loopback,
+    no_proxy: process.env.no_proxy || process.env.NO_PROXY || loopback,
     // Prefer an explicit loopback bind — some Windows setups + proxy break "localhost".
     HOST: "127.0.0.1",
     PORT: String(OMNI_PORT),
@@ -1167,6 +1153,15 @@ function omniChildEnv() {
     "all_proxy",
   ]) {
     delete env[key];
+  }
+  const proxy = readHttpProxy();
+  if (proxy) {
+    env.HTTP_PROXY = proxy;
+    env.HTTPS_PROXY = proxy;
+    env.http_proxy = proxy;
+    env.https_proxy = proxy;
+    env.NO_PROXY = loopback;
+    env.no_proxy = loopback;
   }
   return env;
 }
@@ -1406,14 +1401,20 @@ function startOmniRoute(opts = {}) {
     if (opts.force) omniChild = null;
 
     installOmniShutdownHooks();
-    const proxyWasSet = Boolean(
+    const configuredProxy = readHttpProxy();
+    const systemProxyWasSet = Boolean(
       process.env.HTTP_PROXY ||
         process.env.HTTPS_PROXY ||
         process.env.ALL_PROXY ||
         process.env.http_proxy ||
         process.env.https_proxy
     );
-    appLog.info(`OmniRoute start ${OMNI}${proxyWasSet ? " (proxy cleared for child)" : ""}`);
+    const proxyNote = configuredProxy
+      ? ` (outbound proxy ${configuredProxy})`
+      : systemProxyWasSet
+        ? " (system proxy cleared for child)"
+        : "";
+    appLog.info(`OmniRoute start ${OMNI}${proxyNote}`);
 
     let child;
     const nodeBin = resolveNodeForOmni();
@@ -2069,7 +2070,13 @@ async function getSetupStatus() {
   }
 
   const ready = checks.node.ok && checks.npm.ok && checks.omniroute.ok && checks.claude.ok && checks.token.ok;
-  return { checks, ready, activeModel: readActiveModel(), install: { ...installState, child: undefined, log: installState.log.slice() } };
+  return {
+    checks,
+    ready,
+    activeModel: readActiveModel(),
+    httpProxy: readHttpProxy(),
+    install: { ...installState, child: undefined, log: installState.log.slice() },
+  };
 }
 
 /**
@@ -2461,15 +2468,6 @@ function mime(file) {
   return "application/octet-stream";
 }
 
-function findBrowser() {
-  const candidates = [
-    path.join(process.env.ProgramFiles || "", "Google\\Chrome\\Application\\chrome.exe"),
-    path.join(process.env.ProgramFiles || "", "Microsoft\\Edge\\Application\\msedge.exe"),
-    path.join(process.env["ProgramFiles(x86)"] || "", "Microsoft\\Edge\\Application\\msedge.exe"),
-  ];
-  return candidates.find((p) => fs.existsSync(p)) || null;
-}
-
 function shouldOpenBrowser() {
   if (process.env.FREECLAUDE_NO_BROWSER === "1") return false;
   return true;
@@ -2656,6 +2654,21 @@ const server = http.createServer(async (req, res) => {
       const body = req.method === "POST" ? await readBody(req) : {};
       const codes = Array.isArray(body.codes) && body.codes.length ? body.codes : null;
       return send(res, 200, await runDoctor({ repair: req.method === "POST", codes }));
+    }
+
+    if (req.method === "POST" && u.pathname === "/api/proxy") {
+      try {
+        const body = await readBody(req);
+        const httpProxy = normalizeHttpProxy(body.httpProxy);
+        writeConfig({ httpProxy: httpProxy || null });
+        appLog.info(`Proxy ${httpProxy ? httpProxy : "cleared"} — restarting OmniRoute`);
+        void restartOmniRoute().catch((err) => {
+          appLog.error(`Proxy: OmniRoute restart failed: ${err.message || err}`);
+        });
+        return send(res, 200, { ok: true, httpProxy, omniRestart: "background" });
+      } catch (err) {
+        return send(res, 400, { ok: false, error: String(err.message || err) });
+      }
     }
 
     if (req.method === "POST" && u.pathname === "/api/setup/install") {
@@ -2886,8 +2899,7 @@ const server = http.createServer(async (req, res) => {
         return send(res, 400, { ok: false, error: st("srv.noActiveCode") });
       }
       const url = body.url || kiroOAuth.verificationUriComplete;
-      const fresh = body.fresh !== false;
-      const opened = openAwsAuthWindow(url, { fresh });
+      const opened = openAwsAuthWindow(url);
       return send(res, 200, {
         ok: true,
         userCode: kiroOAuth.userCode,

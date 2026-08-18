@@ -1065,6 +1065,21 @@ body {
 .axiom-box.on .fc-switch-state { color: var(--ok); }
 
 .lang-box .axiom-meta { font-family: var(--font); }
+.proxy-box .axiom-head { margin-bottom: 10px; }
+.proxy-inputs { margin-top: 2px; }
+#httpProxy {
+  flex: 1;
+  min-width: 220px;
+  background: #0f131a;
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 12px;
+  padding: 11px 13px;
+  font: inherit;
+  font-family: var(--mono);
+  outline: none;
+}
+#httpProxy:focus { border-color: rgba(124,108,255,.5); }
 .lang-picker {
   display: inline-flex;
   gap: 6px;
@@ -1522,7 +1537,7 @@ body {
 .kiro-simple.done .kiro-simple-title { color: #6ee7a8; }
 .kiro-simple-sub {
   margin: 0;
-  max-width: 28ch;
+  max-width: 42ch;
   font-size: 0.85rem;
   line-height: 1.4;
   color: var(--muted);

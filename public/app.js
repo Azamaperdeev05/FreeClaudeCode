@@ -152,6 +152,8 @@ const els = {
   langPicker: document.getElementById("langPicker"),
   btnDoctor: document.getElementById("btnDoctor"),
   doctorResult: document.getElementById("doctorResult"),
+  httpProxy: document.getElementById("httpProxy"),
+  btnSaveProxy: document.getElementById("btnSaveProxy"),
 };
 
 let toastTimer = null;
@@ -925,7 +927,7 @@ async function openKiroAuth() {
       els.kiroModal.setAttribute("aria-hidden", "false");
     }
 
-    await openAwsWindow(kiroAuth.verificationUriComplete, { fresh: true });
+    await openAwsWindow(kiroAuth.verificationUriComplete);
     setKiroWait("wait");
 
     if (kiroAuth.timer) clearTimeout(kiroAuth.timer);
@@ -1084,6 +1086,9 @@ function setKiroWait(state, title, sub) {
     if (state === "error" && (sub || title)) {
       els.kiroWaitSub.textContent = sub || title;
       els.kiroWaitSub.classList.remove("hidden");
+    } else if (state === "wait") {
+      els.kiroWaitSub.textContent = t("kiro.browserHint");
+      els.kiroWaitSub.classList.remove("hidden");
     } else {
       els.kiroWaitSub.textContent = "";
       els.kiroWaitSub.classList.add("hidden");
@@ -1091,19 +1096,19 @@ function setKiroWait(state, title, sub) {
   }
 }
 
-/** Open AWS device auth in a clean browser profile (no saved Builder ID session). */
-async function openAwsWindow(url, { fresh = true } = {}) {
+/** Open AWS device auth in the OS default browser (VPN extensions stay on). */
+async function openAwsWindow(url) {
   if (!url) return false;
   try {
     const r = await fetch("/api/kiro/open-aws", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, fresh }),
+      body: JSON.stringify({ url }),
     }).then((x) => x.json());
     return Boolean(r.ok);
   } catch {
     try {
-      const w = window.open(url, "kiro_aws_auth", "popup=yes,width=980,height=820");
+      const w = window.open(url, "_blank", "noopener");
       kiroAuth.awsWin = w;
       return Boolean(w);
     } catch {
@@ -1376,7 +1381,28 @@ function render() {
 async function loadSetup() {
   const setup = await fetch("/api/setup").then((r) => r.json());
   renderSetup(setup);
+  if (els.httpProxy && setup.httpProxy != null) els.httpProxy.value = setup.httpProxy;
   return setup;
+}
+
+async function saveProxy() {
+  const httpProxy = String(els.httpProxy?.value || "").trim();
+  const btn = els.btnSaveProxy;
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/proxy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ httpProxy }),
+    }).then((x) => x.json());
+    if (!r.ok) throw new Error(r.error || t("toast.error"));
+    if (els.httpProxy) els.httpProxy.value = r.httpProxy || "";
+    toast(r.httpProxy ? t("proxy.saved") : t("proxy.cleared"));
+  } catch (e) {
+    toast(String(e.message || e), true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 function formatKb(bytes) {
@@ -1991,7 +2017,7 @@ if (els.btnKiroCopy) els.btnKiroCopy.addEventListener("click", copyKiroCode);
 if (els.btnKiroOpenAws) {
   els.btnKiroOpenAws.addEventListener("click", async () => {
     if (!kiroAuth.verificationUriComplete) return;
-    const ok = await openAwsWindow(kiroAuth.verificationUriComplete, { fresh: true });
+    const ok = await openAwsWindow(kiroAuth.verificationUriComplete);
     if (!ok) {
       toast(t("kiro.awsOpenFailed"), true);
       return;
@@ -2009,6 +2035,12 @@ if (els.btnKiroRetry) {
   });
 }
 if (els.btnDoctor) els.btnDoctor.addEventListener("click", runDoctorCheck);
+if (els.btnSaveProxy) els.btnSaveProxy.addEventListener("click", () => saveProxy());
+if (els.httpProxy) {
+  els.httpProxy.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") saveProxy();
+  });
+}
 if (els.langPicker) {
   els.langPicker.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-lang]");

@@ -6,7 +6,7 @@
   <title>FreeClaude</title>
   <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
   <!-- CSS is inlined by the server into #fc-css so F5 cannot load HTML without styles. -->
-  <link rel="stylesheet" href="/styles.css?v=38" />
+  <link rel="stylesheet" href="/styles.css?v=39" />
   <style id="fc-critical">
     html, body { margin: 0; min-height: 100%; background: #0b0d12; color: #eef2f8; font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif; }
     .hidden { display: none !important; }
@@ -259,6 +259,20 @@
           </div>
         </div>
 
+        <div class="axiom-box proxy-box">
+          <div class="axiom-head">
+            <span class="axiom-ico" aria-hidden="true"><svg class="ic"><use href="#i-globe"/></svg></span>
+            <div class="axiom-info">
+              <div class="axiom-title" data-i18n="proxy.title">HTTP proxy</div>
+              <div class="axiom-meta" data-i18n="proxy.meta">For OmniRoute → AWS if the login page is blocked. Localhost is never proxied.</div>
+            </div>
+          </div>
+          <div class="key-inputs proxy-inputs">
+            <input id="httpProxy" type="text" spellcheck="false" autocomplete="off" data-i18n-placeholder="proxy.placeholder" placeholder="http://127.0.0.1:10809" />
+            <button id="btnSaveProxy" class="btn ghost" type="button"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg><span data-i18n="proxy.save">Save</span></button>
+          </div>
+        </div>
+
         <div class="axiom-box lang-box">
           <div class="axiom-head">
             <span class="axiom-ico" aria-hidden="true"><svg class="ic"><use href="#i-globe"/></svg></span>
@@ -380,6 +394,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=43"></script>
+  <script src="/app.js?v=44"></script>
 </body>
 </html>
