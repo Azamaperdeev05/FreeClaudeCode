@@ -6,7 +6,7 @@
   <title>FreeClaude</title>
   <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
   <!-- CSS is inlined by the server into #fc-css so F5 cannot load HTML without styles. -->
-  <link rel="stylesheet" href="/styles.css?v=39" />
+  <link rel="stylesheet" href="/styles.css?v=40" />
   <style id="fc-critical">
     html, body { margin: 0; min-height: 100%; background: #0b0d12; color: #eef2f8; font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif; }
     .hidden { display: none !important; }
@@ -192,15 +192,14 @@
         <header class="page-head">
           <div>
             <h1 data-i18n="chats.title">Claude chats</h1>
+            <p id="chatsMeta" class="page-sub" data-i18n="chats.loading">Loading…</p>
           </div>
           <div class="page-actions">
             <button id="btnContinueTop" class="btn ghost" type="button" disabled><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg><span data-i18n="chats.continue">Continue last</span></button>
             <button id="btnChatsRefresh" class="btn ghost" type="button"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg><span data-i18n="chats.refresh">Refresh</span></button>
           </div>
         </header>
-        <div class="chats-box" id="chatsBox">
-          <div id="chatsList" class="chats-list"><div class="chats-empty" data-i18n="chats.empty">No saved chats yet — open Claude once, then they show up here</div></div>
-        </div>
+        <div id="chatsList" class="chats-list" aria-live="polite"><div class="empty" data-i18n="chats.empty">No saved chats yet — open Claude once, then they show up here</div></div>
       </section>
 
       <section class="tab hidden" id="tab-setup">
@@ -378,22 +377,14 @@
         <div class="kiro-ring" aria-hidden="true"></div>
         <div class="kiro-simple-title" id="kiroWaitTitle" data-i18n="kiro.simpleTitle">Sign in to your account</div>
         <div class="kiro-simple-sub hidden" id="kiroWaitSub"></div>
-        <button type="button" class="btn ghost small kiro-cancel hidden" data-kiro-cancel data-i18n="common.cancel">Cancel</button>
-      </div>
-      <!-- Kept for the existing auth JS; not shown in the UI. -->
-      <div class="hidden" aria-hidden="true">
-        <ol class="kiro-steps" id="kiroSteps"></ol>
-        <div id="kiroUserCode"></div>
-        <span id="kiroStatus"></span>
-        <span id="kiroElapsed"></span>
-        <span id="kiroPollSub"></span>
-        <button type="button" id="btnKiroCopy"></button>
-        <button type="button" id="btnKiroOpenAws"></button>
-        <button type="button" id="btnKiroRetry"></button>
+        <div class="kiro-actions">
+          <button type="button" id="btnKiroRetry" class="btn accent small hidden" data-i18n="kiro.retry">Retry</button>
+          <button type="button" id="btnKiroCancel" class="btn ghost small hidden" data-kiro-cancel data-i18n="common.cancel">Cancel</button>
+        </div>
       </div>
     </div>
   </div>
 
-  <script src="/app.js?v=44"></script>
+  <script src="/app.js?v=46"></script>
 </body>
 </html>

@@ -73,6 +73,7 @@ const state = {
   installStarting: false,
   logsPoll: null,
   tab: "home",
+  chats: { list: null, at: 0, loading: false },
   // Kept so a language switch can repaint server-sourced text without waiting on a refetch.
   lastSetup: null,
   lastQuota: null,
@@ -96,6 +97,7 @@ const els = {
   btnContinueChat: document.getElementById("btnContinueChat"),
   btnChatsRefresh: document.getElementById("btnChatsRefresh"),
   chatsList: document.getElementById("chatsList"),
+  chatsMeta: document.getElementById("chatsMeta"),
   activeBar: document.getElementById("activeBar"),
   activeBarIcon: document.getElementById("activeBarIcon"),
   activeBarModel: document.getElementById("activeBarModel"),
@@ -138,17 +140,11 @@ const els = {
   btnPathSave: document.getElementById("btnPathSave"),
   btnPathReset: document.getElementById("btnPathReset"),
   kiroModal: document.getElementById("kiroModal"),
-  kiroUserCode: document.getElementById("kiroUserCode"),
-  kiroStatus: document.getElementById("kiroStatus"),
   kiroWait: document.getElementById("kiroWait"),
   kiroWaitTitle: document.getElementById("kiroWaitTitle"),
   kiroWaitSub: document.getElementById("kiroWaitSub"),
-  btnKiroOpenAws: document.getElementById("btnKiroOpenAws"),
   btnKiroRetry: document.getElementById("btnKiroRetry"),
-  kiroSteps: document.getElementById("kiroSteps"),
-  kiroPollSub: document.getElementById("kiroPollSub"),
-  kiroElapsed: document.getElementById("kiroElapsed"),
-  btnKiroCopy: document.getElementById("btnKiroCopy"),
+  btnKiroCancel: document.getElementById("btnKiroCancel"),
   langPicker: document.getElementById("langPicker"),
   btnDoctor: document.getElementById("btnDoctor"),
   doctorResult: document.getElementById("doctorResult"),
@@ -261,11 +257,12 @@ async function loadAppLogs({ quiet } = {}) {
     if (!data.ok) throw new Error(data.error || t("logs.loadFailed"));
     const text = data.text || "";
     if (els.logsMeta) {
-      els.logsMeta.textContent = t("logs.meta", {
+      const meta = t("logs.meta", {
         lines: data.lines || 0,
         size: formatBytes(data.bytes),
         path: data.path || "",
       });
+      els.logsMeta.textContent = data.truncated ? `${meta} · ${t("logs.tailed")}` : meta;
     }
     if (els.appLogView) {
       const nearBottom =
@@ -350,7 +347,7 @@ function setTab(tab) {
   if (logs) logs.classList.toggle("hidden", state.tab !== "logs");
   if (els.foot) els.foot.classList.toggle("hidden", state.tab !== "models");
   if (state.tab === "setup") {
-    loadSetup();
+    loadSetup().catch(() => {});
     loadQuota().catch(() => {});
     loadAxiom();
   }
@@ -363,6 +360,10 @@ function setTab(tab) {
   } else {
     stopLogsPoll();
   }
+  // Home/Chats/Logs show neither the quota banner nor the account card.
+  if (quotaTabActive()) ensureQuotaPoll();
+  else stopQuotaPoll();
+  syncLimitTimer();
 }
 
 function statusOf(id) {
@@ -407,15 +408,40 @@ function modelIconSlug(id) {
   return BRANDS[modelBrand(id)].slug;
 }
 
+// The icon CDN is unreachable on a fair share of the networks this ships to, and the model
+// grid re-renders on every refresh — so a blocked machine fired the same doomed request per
+// card, forever. One failure parks the CDN for a day; the monogram is a complete fallback.
+const ICON_CDN_DEAD_KEY = "fc.iconCdnDeadAt";
+const ICON_CDN_RETRY_MS = 24 * 60 * 60 * 1000;
+
+function iconCdnDead() {
+  try {
+    const at = Number(localStorage.getItem(ICON_CDN_DEAD_KEY) || 0);
+    return at > 0 && Date.now() - at < ICON_CDN_RETRY_MS;
+  } catch {
+    return false;
+  }
+}
+
+window.__fcIconFailed = function () {
+  try {
+    if (!iconCdnDead()) localStorage.setItem(ICON_CDN_DEAD_KEY, String(Date.now()));
+  } catch {
+    /* ignore */
+  }
+};
+
 /**
  * The logo is a progressive enhancement: the monogram shows immediately and the CDN image
  * only replaces it once it actually loads, so an offline run never shows a broken icon.
  */
 function modelIconImgHtml(id) {
+  if (iconCdnDead()) return "";
   const src = `https://unpkg.com/@lobehub/icons-static-svg@latest/icons/${modelIconSlug(id)}.svg`;
   return (
     `<img src="${src}" alt="" loading="lazy" decoding="async"` +
-    ` onload="this.parentNode.classList.add('has-img')" onerror="this.remove()" />`
+    ` onload="this.parentNode.classList.add('has-img')"` +
+    ` onerror="this.remove();window.__fcIconFailed()" />`
   );
 }
 
@@ -497,9 +523,14 @@ function updateLimitTicker() {
   }
 }
 
-/** The 1s ticker only has work to do while a limit is counting down. */
+/** Quota only feeds the Models grid and the Settings account card. */
+function quotaTabActive() {
+  return state.tab === "models" || state.tab === "setup";
+}
+
+/** The 1s ticker only has work to do while a limit is counting down on a visible tab. */
 function syncLimitTimer() {
-  const needed = Boolean(state.limit.limited || state.limit.banned);
+  const needed = Boolean(state.limit.limited || state.limit.banned) && quotaTabActive();
   if (needed && !state.limitTimer) {
     state.limitTimer = setInterval(updateLimitTicker, 1000);
   } else if (!needed && state.limitTimer) {
@@ -509,7 +540,7 @@ function syncLimitTimer() {
 }
 
 function ensureQuotaPoll() {
-  if (state.quotaPoll || document.hidden) return;
+  if (state.quotaPoll || document.hidden || !quotaTabActive()) return;
   state.quotaPoll = setInterval(() => {
     loadQuota().catch(() => {});
   }, 20000);
@@ -577,7 +608,7 @@ function updateLaunchButtons() {
       els.activeBarIcon.removeAttribute("title");
     }
     if (!state.omniOnline) {
-      els.modelTag.textContent = "OmniRoute offline";
+      els.modelTag.textContent = t("conn.offline");
     } else if (!state.kiroConnected) {
       els.modelTag.textContent = t("models.tagNoAccount");
     } else if (state.limit?.banned) {
@@ -649,15 +680,16 @@ function renderConn(status) {
   const online = Boolean(status?.omni);
   state.omniOnline = online;
   els.connDot.className = `dot ${online ? "on" : "off"}`;
-  const text = online ? "OmniRoute online" : "OmniRoute offline";
+  const text = online ? t("conn.online") : t("conn.offline");
   if (els.connSubText) els.connSubText.textContent = text;
   else els.connSub.textContent = text;
   setStatusIcon(els.connSub, online);
   els.connMeta.textContent = online
     ? t("conn.keyPresent", { state: status.token ? status.tokenMasked || t("conn.keyYes") : t("conn.keyNo") })
     : t("conn.omniDown");
-  if (els.sideStatusText) els.sideStatusText.textContent = online ? "online" : "offline";
-  else els.sideStatus.textContent = online ? "online" : "offline";
+  const short = online ? t("conn.shortOnline") : t("conn.shortOffline");
+  if (els.sideStatusText) els.sideStatusText.textContent = short;
+  else els.sideStatus.textContent = short;
   setStatusIcon(els.sideStatus, online);
   if (status?.activeModel) state.activeModel = status.activeModel;
   // /api/status already knows Kiro — keep the UI in sync without waiting for /api/quota.
@@ -916,10 +948,7 @@ async function openKiroAuth() {
     kiroAuth.intervalMs = Math.max(3000, (Number(r.interval) || 5) * 1000);
     kiroAuth.verificationUriComplete = r.verificationUriComplete || "";
 
-    if (els.kiroUserCode) els.kiroUserCode.textContent = r.userCode || "—";
-    setKiroStatus(t("kiro.simpleTitle"));
-    setKiroStep("code");
-    startKiroClock();
+    kiroAuth.attempts = 0;
     setKiroWait("wait");
     setKiroRetryButton("waiting");
     if (els.kiroModal) {
@@ -963,75 +992,7 @@ const kiroAuth = {
   active: false,
   verificationUriComplete: "",
   awsWin: null,
-  startedAt: 0,
-  tick: null,
 };
-
-/*
- * The device flow has no progress to report, so the modal shows which stage it is on.
- * Order matters: everything before the current step is drawn as finished.
- */
-const KIRO_STEPS = ["open", "code", "link", "models"];
-
-/** `name` may also be "done", which completes every step. */
-function setKiroStep(name, mode = "active") {
-  if (!els.kiroSteps) return;
-  const idx = name === "done" ? KIRO_STEPS.length : KIRO_STEPS.indexOf(name);
-  if (idx < 0) return;
-  for (const li of els.kiroSteps.querySelectorAll(".kiro-step")) {
-    const i = KIRO_STEPS.indexOf(li.dataset.step);
-    li.classList.toggle("done", i < idx);
-    li.classList.toggle("active", i === idx && mode === "active");
-    li.classList.toggle("error", i === idx && mode === "error");
-  }
-}
-
-function startKiroClock() {
-  kiroAuth.startedAt = Date.now();
-  kiroAuth.attempts = 0;
-  stopKiroClock(true);
-  kiroAuth.tick = setInterval(renderKiroElapsed, 1000);
-  renderKiroElapsed();
-}
-
-function stopKiroClock(keepText = false) {
-  if (kiroAuth.tick) {
-    clearInterval(kiroAuth.tick);
-    kiroAuth.tick = null;
-  }
-  if (!keepText && els.kiroElapsed) els.kiroElapsed.textContent = "";
-}
-
-function renderKiroElapsed() {
-  if (!els.kiroElapsed || !kiroAuth.startedAt) return;
-  const sec = Math.floor((Date.now() - kiroAuth.startedAt) / 1000);
-  els.kiroElapsed.textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
-}
-
-async function copyKiroCode() {
-  const code = (els.kiroUserCode?.textContent || "").trim();
-  if (!code || /^—+$/.test(code)) return;
-  let ok = false;
-  try {
-    await navigator.clipboard.writeText(code);
-    ok = true;
-  } catch {
-    // Clipboard API needs a secure context; the local page is http, so fall back.
-    try {
-      const ta = document.createElement("textarea");
-      ta.value = code;
-      ta.style.position = "fixed";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
-      ta.select();
-      ok = document.execCommand("copy");
-      ta.remove();
-    } catch {
-      ok = false;
-    }
-  }
-  toast(ok ? t("kiro.copied", { code }) : t("kiro.copyFailed"), !ok);
-}
 
 /**
  * Polling has stopped for good. Clearing `active` too is what keeps the modal from
@@ -1046,29 +1007,12 @@ function stopKiroPolling() {
   if (els.btnOpenKiro) els.btnOpenKiro.disabled = false;
 }
 
-/**
- * The click handler reads `dataset.action`, not the label: comparing against a translated
- * caption would silently stop working the moment the language changes.
- */
+/** Only offered once polling has given up — retrying mid-flight would race the poll loop. */
 function setKiroRetryButton(mode) {
   const btn = els.btnKiroRetry;
   if (!btn) return;
-  const modes = {
-    waiting: { key: "kiro.retryWaiting", disabled: true, action: "" },
-    retry: { key: "kiro.retry", disabled: false, action: "retry" },
-    done: { key: "kiro.done", disabled: false, action: "" },
-  };
-  const m = modes[mode] || modes.waiting;
-  btn.dataset.i18n = m.key;
-  btn.dataset.action = m.action;
-  btn.textContent = t(m.key);
-  btn.disabled = m.disabled;
-}
-
-function setKiroStatus(text, isErr = false) {
-  if (!els.kiroStatus) return;
-  els.kiroStatus.textContent = text;
-  els.kiroStatus.style.color = isErr ? "var(--bad)" : "var(--muted)";
+  btn.textContent = t("kiro.retry");
+  btn.classList.toggle("hidden", mode !== "retry");
 }
 
 function setKiroWait(state, title, sub) {
@@ -1093,6 +1037,10 @@ function setKiroWait(state, title, sub) {
       els.kiroWaitSub.textContent = "";
       els.kiroWaitSub.classList.add("hidden");
     }
+  }
+  // Cancel is only meaningful while the poll loop is actually running.
+  if (els.btnKiroCancel) {
+    els.btnKiroCancel.classList.toggle("hidden", state !== "wait" || !kiroAuth.active);
   }
 }
 
@@ -1131,7 +1079,6 @@ function cancelKiroAuth() {
     clearTimeout(kiroAuth.timer);
     kiroAuth.timer = null;
   }
-  stopKiroClock();
   fetch("/api/kiro/cancel", { method: "POST" }).catch(() => {});
   hideKiroModal();
 }
@@ -1147,8 +1094,6 @@ function closeKiroModal() {
 }
 
 async function finishKiroSuccess(r) {
-  setKiroStatus(t("kiro.codeConfirmed"));
-  setKiroStep("link");
   setKiroWait("wait");
   toast(t("kiro.connected"));
   kiroAuth.active = false;
@@ -1188,9 +1133,6 @@ async function finishKiroSuccess(r) {
       /* ignore */
     }
   }
-
-  setKiroStep("models");
-  setKiroStatus(t("kiro.loadingModels"));
   setKiroWait("wait");
 
   setTab("models");
@@ -1214,10 +1156,7 @@ async function finishKiroSuccess(r) {
     }
     await new Promise((res) => setTimeout(res, 1200));
   }
-
-  stopKiroClock(true);
   if (!gotModels) {
-    setKiroStep("models", "error");
     setKiroWait("error", t("kiro.modelsLate"), t("kiro.modelsLateSub"));
     toast(t("kiro.modelsLateToast"), true);
   } else if (!state.kiroConnected) {
@@ -1229,8 +1168,6 @@ async function finishKiroSuccess(r) {
   }
 
   if (gotModels) {
-    setKiroStep("done");
-    setKiroStatus(t("kiro.done"));
     setKiroWait("done");
   }
 
@@ -1264,24 +1201,13 @@ async function pollKiroLoop() {
     if (!kiroAuth.active) return;
     if (r.pending || r.error === "authorization_pending" || r.error === "slow_down") {
       kiroAuth.attempts += 1;
-      setKiroStep("code");
-      setKiroStatus(r.slowDown ? t("kiro.slowDown") : t("kiro.awaitingConfirm"));
       setKiroWait("wait");
       const wait = r.slowDown ? Math.max(kiroAuth.intervalMs + 5000, 10000) : kiroAuth.intervalMs;
-      if (els.kiroPollSub) {
-        els.kiroPollSub.textContent = t("kiro.step.code.attempt", {
-          n: kiroAuth.attempts,
-          sec: Math.round(wait / 1000),
-        });
-      }
       kiroAuth.timer = setTimeout(pollKiroLoop, wait);
       return;
     }
     const msg = r.errorDescription || r.error || t("kiro.authError");
     stopKiroPolling();
-    stopKiroClock(true);
-    setKiroStep("code", "error");
-    setKiroStatus(msg, true);
     setKiroWait("error", t("kiro.finishFailed"), t("kiro.finishFailedSub", { error: msg }));
     setKiroRetryButton("retry");
   } catch (e) {
@@ -1291,14 +1217,10 @@ async function pollKiroLoop() {
     if (/failed to fetch|networkerror|load failed|network request failed/i.test(msg) && kiroAuth.fetchFails < 10) {
       kiroAuth.fetchFails += 1;
       setKiroWait("wait");
-      setKiroStatus(t("kiro.connRetry"));
       kiroAuth.timer = setTimeout(pollKiroLoop, 2000);
       return;
     }
     stopKiroPolling();
-    stopKiroClock(true);
-    setKiroStep("code", "error");
-    setKiroStatus(msg, true);
     setKiroWait("error", t("kiro.connError"), msg);
     setKiroRetryButton("retry");
   }
@@ -1570,6 +1492,7 @@ async function setLanguage(next) {
   if (state.lastQuota) renderQuota(state.lastQuota);
   if (state.lastAxiom) renderAxiom(state.lastAxiom);
   if (state.lastDoctor) renderDoctor(state.lastDoctor);
+  if (state.chats.list) renderChats(state.chats.list);
   render();
   if (state.models.length) els.foot.textContent = t("models.count", { n: state.models.length });
   toast(t("lang.switched"));
@@ -1588,7 +1511,6 @@ async function bootstrap() {
   } catch {
     renderConn({ omni: false });
   }
-  await loadSetup().catch(() => {});
   try {
     const s = await fetch("/api/bootstrap", { method: "POST" }).then((r) => r.json());
     renderConn(s);
@@ -1730,41 +1652,72 @@ function shortAgo(iso) {
   return t("chats.ago", { time: `${d}d` });
 }
 
+/**
+ * Cards are narrow and every project path starts with the same C:\Users\… prefix, so the
+ * head is what gets clipped and the useful part — the folder — never shows. Keep the tail.
+ */
 function shortPath(p) {
-  const s = String(p || "");
-  if (!s) return "";
-  if (s.length <= 48) return s;
-  return `…${s.slice(-46)}`;
+  const parts = String(p || "")
+    .split(/[\\/]+/)
+    .filter(Boolean);
+  if (!parts.length) return "";
+  const tail = parts.slice(-2).join("\\");
+  return parts.length > 2 ? `…\\${tail}` : tail;
+}
+
+function setChatsMeta(text) {
+  if (els.chatsMeta) els.chatsMeta.textContent = text;
 }
 
 function renderChats(sessions) {
   if (!els.chatsList) return;
   const list = Array.isArray(sessions) ? sessions : [];
+  setChatsMeta(t("chats.count", { n: list.length }));
   if (!list.length) {
-    els.chatsList.innerHTML = `<div class="chats-empty">${esc(t("chats.empty"))}</div>`;
+    els.chatsList.innerHTML = `<div class="empty">${esc(t("chats.empty"))}</div>`;
     return;
   }
   els.chatsList.innerHTML = list
-    .map(
-      (s) => `<div class="chat-row" data-session-id="${esc(s.id)}" data-cwd="${esc(s.cwd || "")}">
+    .map((s) => {
+      const title = s.title || s.id;
+      const tip = s.cwd ? `${title}\n${s.cwd}` : title;
+      return `<div class="chat-row" role="button" tabindex="0" data-session-id="${esc(s.id)}" data-cwd="${esc(s.cwd || "")}" title="${esc(tip)}">
+        <span class="chat-ico" aria-hidden="true"><svg class="ic"><use href="#i-terminal"/></svg></span>
         <div class="chat-main">
-          <div class="chat-title" title="${esc(s.title || s.id)}">${esc(s.title || s.id)}</div>
-          <div class="chat-meta">${esc(shortAgo(s.mtime))}${s.cwd ? ` · ${esc(shortPath(s.cwd))}` : ""}</div>
+          <div class="chat-title">${esc(title)}</div>
+          <div class="chat-meta">
+            <span class="chat-time">${esc(shortAgo(s.mtime))}</span>
+            ${s.cwd ? `<span class="chat-path">${esc(shortPath(s.cwd))}</span>` : ""}
+          </div>
         </div>
-        <button type="button" class="btn ghost small" data-chat-resume>${esc(t("chats.resume"))}</button>
-      </div>`
-    )
+        <button type="button" class="btn ghost small" data-chat-resume aria-label="${esc(`${t("chats.resume")}: ${title}`)}">${esc(t("chats.resume"))}</button>
+      </div>`;
+    })
     .join("");
 }
 
-async function loadChats() {
+async function loadChats({ force = false } = {}) {
   if (!els.chatsList) return;
+  // Switching tabs back and forth should not re-scan the whole projects tree each time.
+  if (!force && state.chats.list && Date.now() - state.chats.at < 30000) {
+    renderChats(state.chats.list);
+    return;
+  }
+  if (state.chats.loading) return;
+  state.chats.loading = true;
+  if (!state.chats.list) setChatsMeta(t("chats.loading"));
   try {
     const r = await fetch("/api/claude/sessions?limit=25").then((x) => x.json());
     if (!r.ok) throw new Error(r.error || t("chats.loadFailed"));
-    renderChats(r.sessions || []);
+    state.chats.list = r.sessions || [];
+    state.chats.at = Date.now();
+    renderChats(state.chats.list);
   } catch (e) {
-    els.chatsList.innerHTML = `<div class="chats-empty">${esc(e.message || t("chats.loadFailed"))}</div>`;
+    const msg = e.message || t("chats.loadFailed");
+    setChatsMeta(t("chats.loadFailed"));
+    els.chatsList.innerHTML = `<div class="empty">${esc(msg)}</div>`;
+  } finally {
+    state.chats.loading = false;
   }
 }
 
@@ -1943,7 +1896,7 @@ document.addEventListener("keydown", (e) => {
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     stopQuotaPoll();
-  } else {
+  } else if (quotaTabActive()) {
     ensureQuotaPoll();
     loadQuota().catch(() => {});
   }
@@ -1963,18 +1916,26 @@ if (els.btnContinueChat) {
 if (els.btnContinueTop) {
   els.btnContinueTop.addEventListener("click", () => launchClaude({ mode: "continue" }));
 }
-if (els.btnChatsRefresh) els.btnChatsRefresh.addEventListener("click", () => loadChats());
+if (els.btnChatsRefresh) els.btnChatsRefresh.addEventListener("click", () => loadChats({ force: true }));
 if (els.chatsList) {
-  els.chatsList.addEventListener("click", (e) => {
-    const btn = e.target.closest("[data-chat-resume]");
-    if (!btn) return;
-    const row = btn.closest("[data-session-id]");
+  const resumeRow = (row) => {
     if (!row) return;
     launchClaude({
       mode: "resume",
       sessionId: row.dataset.sessionId,
       cwd: row.dataset.cwd || "",
     });
+  };
+  // The whole card is the target; the button stays for discoverability.
+  els.chatsList.addEventListener("click", (e) => {
+    resumeRow(e.target.closest("[data-session-id]"));
+  });
+  els.chatsList.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const row = e.target.closest?.("[data-session-id]");
+    if (!row) return;
+    e.preventDefault();
+    resumeRow(row);
   });
 }
 document.getElementById("btnSaveKey").addEventListener("click", saveKey);
@@ -2013,27 +1974,7 @@ if (els.kiroModal) {
     if (e.target.closest?.("[data-kiro-close]")) closeKiroModal();
   });
 }
-if (els.btnKiroCopy) els.btnKiroCopy.addEventListener("click", copyKiroCode);
-if (els.btnKiroOpenAws) {
-  els.btnKiroOpenAws.addEventListener("click", async () => {
-    if (!kiroAuth.verificationUriComplete) return;
-    const ok = await openAwsWindow(kiroAuth.verificationUriComplete);
-    if (!ok) {
-      toast(t("kiro.awsOpenFailed"), true);
-      return;
-    }
-    if (kiroAuth.active) {
-      setKiroStep("code");
-      setKiroStatus(t("kiro.awaitingConfirm"));
-      setKiroWait("wait");
-    }
-  });
-}
-if (els.btnKiroRetry) {
-  els.btnKiroRetry.addEventListener("click", () => {
-    if (els.btnKiroRetry.dataset.action === "retry") openKiroAuth();
-  });
-}
+if (els.btnKiroRetry) els.btnKiroRetry.addEventListener("click", () => openKiroAuth());
 if (els.btnDoctor) els.btnDoctor.addEventListener("click", runDoctorCheck);
 if (els.btnSaveProxy) els.btnSaveProxy.addEventListener("click", () => saveProxy());
 if (els.httpProxy) {
@@ -2102,7 +2043,7 @@ async function ensureAccess() {
   let savedTab = "home";
   try {
     const raw = localStorage.getItem("fc-tab");
-    savedTab = raw === "models" || raw === "setup" || raw === "home" ? raw : "home";
+    savedTab = ["home", "models", "chats", "setup", "logs"].includes(raw) ? raw : "home";
   } catch {
     savedTab = "home";
   }

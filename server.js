@@ -4,9 +4,8 @@ const path = require("path");
 const fs = require("fs");
 const os = require("os");
 const crypto = require("crypto");
-const { spawn, spawnSync, execFile, execFileSync } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
 const { URL } = require("url");
-const { promisify } = require("util");
 const omniKeys = process.pkg ? require("./omni-keys-proxy") : require("./omni-keys");
 const { createAxiom } = require("./axiom");
 const { describeUpstreamError } = require("./errors");
@@ -14,8 +13,6 @@ const { kiroStateFromProviders } = require("./kiro-state");
 const { createAppLog } = require("./app-log");
 const { listClaudeSessions, isSessionId } = require("./claude-sessions");
 const i18n = require("./i18n");
-
-const execFileAsync = promisify(execFile);
 
 const PORT = 3847;
 const OMNI = "http://127.0.0.1:20128";
@@ -66,7 +63,7 @@ const NPM_BIN = path.join(process.env.APPDATA || "", "npm");
 const LOCALAPPDATA = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
 const NODE_PORTABLE_DIR = path.join(LOCALAPPDATA, "Programs", "node");
 const MIN_NODE_MAJOR = 22;
-const ACCESS_URL = "https://pastebin.com/raw/8tzPV0Bu";
+const ACCESS_URL = "https://pastebin.com/raw/7e9KCTtc";
 const TELEGRAM_URL = "https://t.me/loveaideep";
 const AWS_SIGNOUT_URL = "https://view.awsapps.com/start/#/signout";
 const AWS_PORTAL_URL = "https://view.awsapps.com/start";
@@ -118,10 +115,6 @@ const PATH_KEYS = {
   omniroute: { exe: "omniroute.cmd", label: "OmniRoute" },
   claude: { exe: "claude.cmd", label: "Claude Code" },
 };
-
-// Packaged EXE: do not auto-spawn a browser from inside pkg (causes 0xC0000005).
-// Use FreeClaude.cmd launcher, or open http://127.0.0.1:3847 manually.
-const openApp = process.argv.includes("--app");
 
 const accessCache = {
   checkedAt: 0,
@@ -540,6 +533,9 @@ function invalidateKiroHttpCache() {
   kiroHttpCache.value = null;
 }
 
+let lastKiroHeal = 0;
+const KIRO_HEAL_MIN_MS = 20000;
+
 /**
  * Kiro is connected if either source says so. The database is authoritative when it
  * answers; HTTP covers the case where it cannot.
@@ -548,10 +544,16 @@ async function resolveKiroConnected({ maxAgeMs = 15000 } = {}) {
   let dbConnected = null;
   let dbError = null;
   try {
-    try {
-      omniKeys.healKiroConnections();
-    } catch {
-      /* healing is best-effort */
+    // Healing writes to OmniRoute's SQLite. Doing it on every status poll contended with
+    // OmniRoute itself (and costs a child process in the packaged build); the OAuth
+    // finalize loop heals on its own lap, so a read path can wait.
+    if (Date.now() - lastKiroHeal > KIRO_HEAL_MIN_MS) {
+      lastKiroHeal = Date.now();
+      try {
+        omniKeys.healKiroConnections();
+      } catch {
+        /* healing is best-effort */
+      }
     }
     const lim = omniKeys.getAccountLimitInfo();
     dbConnected = Boolean(lim && lim.connected);
@@ -815,10 +817,6 @@ function openAwsSignOut() {
   return openAwsAuthWindow(AWS_SIGNOUT_URL);
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
 async function checkAccess(force = false) {
   const now = Date.now();
   if (!force && accessCache.checkedAt && now - accessCache.checkedAt < 60_000) {
@@ -915,12 +913,22 @@ function isClaudeCodeReady() {
   }
 }
 
+// /api/status alone reads the config three times; re-parsing it per call showed up as
+// steady sync disk work while the UI polls. Writes refresh the cache in place.
+const configCache = { at: 0, value: null };
+const CONFIG_TTL_MS = 1000;
+
 function readConfig() {
+  if (configCache.value && Date.now() - configCache.at < CONFIG_TTL_MS) return configCache.value;
+  let value;
   try {
-    return JSON.parse(fs.readFileSync(CONFIG, "utf8"));
+    value = JSON.parse(fs.readFileSync(CONFIG, "utf8"));
   } catch {
-    return {};
+    value = {};
   }
+  configCache.value = value;
+  configCache.at = Date.now();
+  return value;
 }
 
 function writeConfig(patch) {
@@ -930,6 +938,8 @@ function writeConfig(patch) {
     if (v == null) delete next[k];
   }
   fs.writeFileSync(CONFIG, JSON.stringify(next, null, 2));
+  configCache.value = next;
+  configCache.at = Date.now();
   return next;
 }
 
@@ -1043,11 +1053,34 @@ function readActiveModel() {
   return MODEL_RE.test(value) ? value : "";
 }
 
-async function isOmniUp() {
+const omniUpCache = { at: 0, value: false };
+
+/**
+ * A healthy OmniRoute answers the first probe in milliseconds; the six-probe walk only
+ * exists for odd binds (IPv6, missing health route), so keep it off the fast path.
+ * Callers that must see a state change immediately pass `maxAgeMs: 0`.
+ */
+async function isOmniUp({ maxAgeMs = 1500 } = {}) {
+  if (maxAgeMs > 0 && omniUpCache.at && Date.now() - omniUpCache.at < maxAgeMs) {
+    return omniUpCache.value;
+  }
   // System HTTP_PROXY can make undici fetch to 127.0.0.1 hang (ETIMEDOUT) while
   // OmniRoute is fine — Byba's machine showed that. Prefer raw http (ignores proxy).
   ensureLocalhostNoProxy();
 
+  const up = await probeOmniOnce();
+  omniUpCache.at = Date.now();
+  omniUpCache.value = up;
+  return up;
+}
+
+function invalidateOmniUpCache() {
+  omniUpCache.at = 0;
+  omniUpCache.value = false;
+}
+
+async function probeOmniOnce() {
+  if (await httpProbeOmni("127.0.0.1", "/api/health", 1200)) return true;
   for (const host of OMNI_HOSTS) {
     for (const pathname of ["/api/health", "/api/monitoring/health", "/"]) {
       if (await httpProbeOmni(host, pathname)) return true;
@@ -1057,14 +1090,14 @@ async function isOmniUp() {
   return false;
 }
 
-function httpProbeOmni(host, pathname) {
+function httpProbeOmni(host, pathname, timeout = 2000) {
   return new Promise((resolve) => {
     const req = http.get(
       {
         host,
         port: OMNI_PORT,
         path: pathname,
-        timeout: 2000,
+        timeout,
         headers: { Connection: "close" },
       },
       (res) => {
@@ -1207,6 +1240,7 @@ function killOmniRouteListeners() {
   // Drop our handle first so startOmniRoute will not think the child is still alive.
   const previous = omniChild;
   omniChild = null;
+  invalidateOmniUpCache();
   if (previous && previous.pid) {
     try {
       spawnSync("taskkill", ["/PID", String(previous.pid), "/T", "/F"], {
@@ -1494,7 +1528,7 @@ async function ensureOmni(timeoutMs = 90000, opts = {}) {
 async function ensureOmniInner(timeoutMs = 90000, opts = {}) {
   try {
     installOmniShutdownHooks();
-    if (await isOmniUp()) {
+    if (await isOmniUp({ maxAgeMs: opts.forceStart ? 0 : 1500 })) {
       // Даже чужой/старый OmniRoute считаем «нашим» для cleanup при выходе
       omniOwned = true;
       if (opts.liveLog) pushLog(st("log.omniAlreadyOnline"));
@@ -1535,7 +1569,7 @@ async function ensureOmniInner(timeoutMs = 90000, opts = {}) {
         return false;
       }
       await sleep(500);
-      if (await isOmniUp()) {
+      if (await isOmniUp({ maxAgeMs: 0 })) {
         const sec = Math.round((Date.now() - start) / 1000);
         if (opts.liveLog) pushLog(st("log.omniOnlineIn", { sec }));
         else appLog.info(`OmniRoute ensure: online in ${sec}s`);
@@ -1543,7 +1577,7 @@ async function ensureOmniInner(timeoutMs = 90000, opts = {}) {
       }
       // Respawn only if the child actually died — OmniRoute often needs >15s on first boot.
       const childDead = !omniChild || omniChild.exitCode != null;
-      if (!retriedSpawn && childDead && Date.now() - start > 5000 && !(await isOmniUp())) {
+      if (!retriedSpawn && childDead && Date.now() - start > 5000) {
         retriedSpawn = true;
         if (opts.liveLog) pushLog(st("log.omniRetryStart"));
         else appLog.warn("OmniRoute ensure: child exited — respawn");
@@ -2022,14 +2056,35 @@ function manualPathsView() {
   return out;
 }
 
-async function getSetupStatus() {
+let lastToolScan = 0;
+const nodeVersionCache = { path: "", value: null };
+
+/** invalidateToolCache() plus the caches derived from the resolved tool paths. */
+function resetToolCaches() {
   invalidateToolCache();
+  lastToolScan = Date.now();
+  nodeVersionCache.path = "";
+  nodeVersionCache.value = null;
+}
+
+async function getSetupStatus() {
+  // The install poller hits this every 600ms, and a full PATH + drive rescan per call was
+  // the most expensive thing in the UI. Install and manual path edits invalidate directly.
+  // Rescanning is only useful while a tool is still missing — an already resolved path is
+  // re-checked on disk by resolveNode/resolveNpm on every call anyway.
+  if (!installState.running && Date.now() - lastToolScan > 5000 && !(resolveNode() && resolveNpm())) {
+    resetToolCaches();
+  }
   const nodeBin = resolveNode();
   const npmBin = resolveNpm();
   let nodeVersion = null;
-  if (nodeBin) {
+  if (nodeBin && nodeVersionCache.path === nodeBin) {
+    nodeVersion = nodeVersionCache.value;
+  } else if (nodeBin) {
     try {
       nodeVersion = (await runCmd(nodeBin, ["-v"])).trim();
+      nodeVersionCache.path = nodeBin;
+      nodeVersionCache.value = nodeVersion;
     } catch {
       nodeVersion = null;
     }
@@ -2211,7 +2266,7 @@ async function installNodeRuntime() {
         ["install", "-e", "--id", "OpenJS.NodeJS.LTS", "--accept-package-agreements", "--accept-source-agreements"],
         { timeout: 1000 * 60 * 15, liveLog: true, track: true }
       );
-      invalidateToolCache();
+      resetToolCaches();
       if (resolveNode()) return;
       pushLog(st("log.wingetNoNode"));
     } catch (err) {
@@ -2223,7 +2278,7 @@ async function installNodeRuntime() {
   }
 
   await installNodeFromZip();
-  invalidateToolCache();
+  resetToolCaches();
   await addToUserPath([NODE_PORTABLE_DIR, NPM_BIN]);
 }
 
@@ -2237,14 +2292,14 @@ async function installAll() {
   installState.child = null;
 
   try {
-    invalidateToolCache();
+    resetToolCaches();
     installState.step = "node";
     assertNotCancelled();
     let nodeBin = resolveNode();
     let npmBin = resolveNpm();
     if (!nodeBin) {
       await installNodeRuntime();
-      invalidateToolCache();
+      resetToolCaches();
       nodeBin = resolveNode();
       npmBin = resolveNpm();
       if (!nodeBin) {
@@ -2257,7 +2312,7 @@ async function installAll() {
 
     assertNotCancelled();
     if (!npmBin) {
-      invalidateToolCache();
+      resetToolCaches();
       npmBin = resolveNpm();
     }
     if (!npmBin) throw new Error(st("srv.npmMissing"));
@@ -2461,6 +2516,22 @@ function send(res, status, data, type = "application/json") {
   res.end(body);
 }
 
+const indexCache = { stamp: "", body: null };
+
+/** mtime+size of every file that feeds the assembled page. */
+function assembledIndexStamp(root) {
+  const parts = [];
+  for (const name of ["index.html", "styles.css", "app.js"]) {
+    try {
+      const st = fs.statSync(path.join(root, name));
+      parts.push(`${name}:${st.mtimeMs}:${st.size}`);
+    } catch {
+      parts.push(`${name}:none`);
+    }
+  }
+  return parts.join("|");
+}
+
 function mime(file) {
   if (file.endsWith(".html")) return "text/html; charset=utf-8";
   if (file.endsWith(".css")) return "text/css; charset=utf-8";
@@ -2473,7 +2544,11 @@ function shouldOpenBrowser() {
   return true;
 }
 
-function openWindow() {
+/**
+ * Opens the UI right after listen(). Every step used to be execFileSync, so a slow shell
+ * handler blocked the server for up to 31s before it could answer its first request.
+ */
+async function openWindow() {
   if (!shouldOpenBrowser()) return;
   const url = `http://127.0.0.1:${PORT}`;
   const sys = process.env.SystemRoot || "C:\\Windows";
@@ -2487,45 +2562,47 @@ function openWindow() {
   };
 
   const attempts = [
-    {
-      name: "rundll32",
-      run: () =>
-        execFileSync(path.join(sys, "System32", "rundll32.exe"), ["url.dll,FileProtocolHandler", url], {
-          stdio: "ignore",
-          windowsHide: true,
-          timeout: 8000,
-        }),
-    },
+    { name: "rundll32", exe: path.join(sys, "System32", "rundll32.exe"), args: ["url.dll,FileProtocolHandler", url] },
     {
       name: "powershell",
-      run: () =>
-        execFileSync(
-          path.join(sys, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
-          ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", `Start-Process '${url}'`],
-          { stdio: "ignore", windowsHide: true, timeout: 15000 }
-        ),
+      exe: path.join(sys, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+      args: ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", `Start-Process '${url}'`],
     },
-    {
-      name: "explorer",
-      run: () =>
-        execFileSync(path.join(sys, "explorer.exe"), [url], {
-          stdio: "ignore",
-          windowsHide: true,
-          timeout: 8000,
-        }),
-    },
+    { name: "explorer", exe: path.join(sys, "explorer.exe"), args: [url] },
   ];
 
   for (const step of attempts) {
-    try {
-      step.run();
+    const ok = await runDetached(step.exe, step.args, 8000);
+    if (ok) {
       log(`ok ${step.name} pkg=${IS_PKG}`);
       return;
-    } catch (err) {
-      log(`fail ${step.name}: ${err && err.message ? err.message : err}`);
     }
+    log(`fail ${step.name}`);
   }
   log("all open methods failed");
+}
+
+/** Resolves false when the child cannot even be spawned; never waits for it to exit. */
+function runDetached(exe, args, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      resolve(ok);
+    };
+    try {
+      const child = spawn(exe, args, { detached: true, stdio: "ignore", windowsHide: true });
+      child.on("error", () => finish(false));
+      child.on("spawn", () => {
+        child.unref();
+        finish(true);
+      });
+      setTimeout(() => finish(false), timeoutMs).unref?.();
+    } catch {
+      finish(false);
+    }
+  });
 }
 
 async function readBody(req) {
@@ -2577,15 +2654,17 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && u.pathname === "/api/logs") {
+      // The tab polls this every 2s; Download still ships the whole file.
       const info = appLog.stats();
-      const text = appLog.readAll();
+      const tail = appLog.readTail(256 * 1024);
       return send(res, 200, {
         ok: true,
-        text,
+        text: tail.text,
+        truncated: tail.truncated,
         path: info.path,
         bytes: info.bytes,
         mtime: info.mtime,
-        lines: text ? text.split(/\r\n|\n|\r/).filter((l) => l.length).length : 0,
+        lines: tail.text ? tail.text.split(/\r\n|\n|\r/).filter((l) => l.length).length : 0,
       });
     }
 
@@ -3001,7 +3080,7 @@ const server = http.createServer(async (req, res) => {
         if (file) paths[key] = file;
         else delete paths[key];
         writeConfig({ paths });
-        invalidateToolCache();
+        resetToolCaches();
         return send(res, 200, { ok: true, key, value: file, paths: manualPathsView() });
       } catch (err) {
         return send(res, 400, { ok: false, error: String(err.message || err) });
@@ -3036,10 +3115,11 @@ const server = http.createServer(async (req, res) => {
         kiroSource = state.source;
         kiroDbError = state.dbError;
       }
+      const token = readToken();
       return send(res, 200, {
         omni,
-        token: Boolean(readToken()),
-        tokenMasked: maskToken(readToken()),
+        token: Boolean(token),
+        tokenMasked: maskToken(token),
         activeModel: readActiveModel(),
         kiro,
         kiroSource,
@@ -3271,10 +3351,24 @@ if errorlevel 1 pause
     const rel = path.relative(root, filePath);
     if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return send(res, 403, "Forbidden", "text/plain");
     if (!fs.existsSync(filePath)) return send(res, 404, "Not found", "text/plain");
-    let body = fs.readFileSync(filePath);
     const type = mime(filePath);
+    const isIndex = safeName === "index.html" || safeName.replace(/\\/g, "/") === "index.html";
+    // Assembling index.html means reading three files and running five regexes; F5 used to
+    // redo all of it, so keep the result until one of the sources actually changes.
+    const indexStamp = isIndex ? assembledIndexStamp(root) : "";
+    if (isIndex && indexCache.body && indexCache.stamp === indexStamp) {
+      res.writeHead(200, {
+        "Content-Type": type,
+        "Cache-Control": "no-store, max-age=0, must-revalidate",
+        Pragma: "no-cache",
+        Expires: "0",
+        "X-FC-Public": root === diskPublicRoot ? "disk" : "snap",
+      });
+      return res.end(indexCache.body);
+    }
+    let body = fs.readFileSync(filePath);
     // Inline CSS into HTML so a refresh can never paint without styles (no 2nd-request race).
-    if (safeName === "index.html" || safeName.replace(/\\/g, "/") === "index.html") {
+    if (isIndex) {
       try {
         let html = body.toString("utf8");
         const cssPath = path.join(root, "styles.css");
@@ -3307,6 +3401,8 @@ if errorlevel 1 pause
           .replace(/<link[^>]+fonts\.googleapis\.com[^>]*>\s*/gi, "")
           .replace(/<link[^>]+fonts\.gstatic\.com[^>]*>\s*/gi, "");
         body = Buffer.from(html, "utf8");
+        indexCache.stamp = indexStamp;
+        indexCache.body = body;
       } catch {
         /* serve raw html */
       }
@@ -3344,7 +3440,7 @@ async function main() {
     const probe = await fetch(`http://127.0.0.1:${PORT}/api/status`, { signal: AbortSignal.timeout(800) });
     if (probe.ok) {
       conSay("ok", st("con.line.gui", { url: `http://127.0.0.1:${PORT}` }));
-      openWindow();
+      await openWindow();
       if (IS_PKG) process.exit(0);
       return;
     }
@@ -3373,7 +3469,8 @@ async function main() {
     conSay("info", st("con.line.gui", { url: `http://127.0.0.1:${PORT}` }));
     conSay("dim", st("con.oneConsole"));
 
-    openWindow();
+    // Not awaited: the shell handler can be slow and the UI must be reachable meanwhile.
+    void openWindow();
 
     try {
       if (isOmniRouteInstalled()) {

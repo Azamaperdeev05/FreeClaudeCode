@@ -78,7 +78,7 @@ scenario("language tags are matched loosely", () => {
 scenario("placeholders are substituted", () => {
   assert.strictEqual(t("en", "models.count", { n: 12 }), "12 models");
   assert.strictEqual(t("ru", "models.count", { n: 12 }), "моделей: 12");
-  assert.strictEqual(t("en", "kiro.copied", { code: "ABCD-EFGH" }), "Code copied: ABCD-EFGH");
+  assert.strictEqual(t("en", "chats.count", { n: 7 }), "Saved chats: 7");
 });
 
 scenario("an unknown placeholder is left alone rather than blanked", () => {

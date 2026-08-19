@@ -82,6 +82,35 @@ function createAppLog(dataDir) {
     }
   }
 
+  /**
+   * Last `maxBytes` of the file, cut at a line boundary. The Logs tab polls every 2s and
+   * the file only ever grows, so re-reading all of it got slower the longer the app ran.
+   */
+  function readTail(maxBytes = 256 * 1024) {
+    const limit = Math.max(4096, Number(maxBytes) || 0);
+    try {
+      if (!exists()) return { text: "", truncated: false, bytes: 0 };
+      const size = fs.statSync(logFile).size;
+      if (size <= limit) return { text: readAll(), truncated: false, bytes: size };
+      const fd = fs.openSync(logFile, "r");
+      try {
+        const buf = Buffer.alloc(limit);
+        const n = fs.readSync(fd, buf, 0, limit, size - limit);
+        const chunk = buf.slice(0, n).toString("utf8");
+        const nl = chunk.indexOf("\n");
+        return { text: nl >= 0 ? chunk.slice(nl + 1) : chunk, truncated: true, bytes: size };
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch (err) {
+      return {
+        text: `[app-log] failed to read: ${err && err.message ? err.message : err}\n`,
+        truncated: false,
+        bytes: 0,
+      };
+    }
+  }
+
   function clear() {
     ensureDir();
     fs.writeFileSync(logFile, "", "utf8");
@@ -145,6 +174,7 @@ function createAppLog(dataDir) {
     error,
     debug,
     readAll,
+    readTail,
     clear,
     stats,
     exists,
