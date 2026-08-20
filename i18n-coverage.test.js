@@ -51,8 +51,8 @@ scenario("every data-i18n key in the markup exists", () => {
   assert.deepStrictEqual(missing, [], `unknown keys: ${missing.join(", ")}`);
 });
 
-scenario("the retry button's three states are all translatable", () => {
-  for (const key of ["kiro.retryWaiting", "kiro.retry", "kiro.done"]) {
+scenario("the login modal's own strings are all translatable", () => {
+  for (const key of ["kiro.retry", "kiro.simpleTitle", "kiro.simpleDone", "kiro.browserHint", "common.cancel"]) {
     assert.ok(key in EN, `${key} missing`);
   }
 });

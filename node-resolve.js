@@ -135,15 +135,38 @@ function manualPath(key, exeName) {
   return existingFile(raw) || existingFile(path.join(raw, exeName));
 }
 
+/**
+ * A candidate may be a thunk. The PATH probes at the end of each list cost a process
+ * spawn apiece (where.exe, plus powershell for the registry PATH), and the array used to
+ * be built eagerly — so a machine with Node in the very first slot still paid for all of
+ * them on every resolve. Thunks keep the tail unevaluated until the cheap paths miss.
+ */
 function firstExisting(candidates) {
   for (const c of candidates) {
     try {
-      if (c && fs.existsSync(c)) return c;
+      const p = typeof c === "function" ? c() : c;
+      if (p && fs.existsSync(p)) return p;
     } catch {
       /* ignore */
     }
   }
   return null;
+}
+
+/** Only walks drives that are actually mounted: a bare existsSync on an absent letter is slow. */
+function driveCandidates(exeName, dirNames) {
+  const out = [];
+  for (const letter of "CDEFGHIJKLMNOPQRSTUVWXYZ") {
+    try {
+      if (!fs.existsSync(`${letter}:\\`)) continue;
+    } catch {
+      continue;
+    }
+    for (const base of [`${letter}:\\Program Files`, `${letter}:\\Program Files (x86)`]) {
+      for (const name of dirNames) out.push(path.join(base, name, exeName));
+    }
+  }
+  return out;
 }
 
 function resolveNode() {
@@ -155,38 +178,29 @@ function resolveNode() {
   if (!IS_WIN) {
     _nodePathCache =
       firstExisting([
-        manualPath("node", "node"),
+        () => manualPath("node", "node"),
         "/opt/homebrew/opt/node@22/bin/node",
         "/opt/homebrew/opt/node/bin/node",
         "/opt/homebrew/bin/node",
         "/usr/local/bin/node",
         "/usr/bin/node",
-        whereOnPath("node"),
+        () => whereOnPath("node"),
         process.execPath && process.execPath.includes("node") ? process.execPath : null,
       ]) || null;
     return _nodePathCache;
   }
 
-  const driveCandidates = [];
-  for (const letter of "CDEFGHIJKLMNOPQRSTUVWXYZ") {
-    for (const base of [`${letter}:\\Program Files`, `${letter}:\\Program Files (x86)`]) {
-      for (const name of ["nodejs", "Nodejs", "Node.js", "node"]) {
-        driveCandidates.push(path.join(base, name, "node.exe"));
-      }
-    }
-  }
-
   _nodePathCache =
     firstExisting([
-      manualPath("node", "node.exe"),
+      () => manualPath("node", "node.exe"),
       path.join(NODE_DIR_DEFAULT, "node.exe"),
       process.env.NVM_SYMLINK ? path.join(process.env.NVM_SYMLINK, "node.exe") : null,
       path.join(process.env.LOCALAPPDATA || "", "Programs", "node", "node.exe"),
       path.join(os.homedir(), "scoop", "apps", "nodejs", "current", "node.exe"),
       path.join(os.homedir(), "scoop", "apps", "nodejs-lts", "current", "node.exe"),
-      ...driveCandidates,
-      whereOnPath("node.exe"),
-      whereOnPath("node"),
+      () => firstExisting(driveCandidates("node.exe", ["nodejs", "Nodejs", "Node.js", "node"])),
+      () => whereOnPath("node.exe"),
+      () => whereOnPath("node"),
     ]) || null;
 
   return _nodePathCache;
@@ -217,14 +231,14 @@ function resolveNpm() {
   // npm.cmd next to node.exe wins over %APPDATA%\npm shims
   _npmPathCache =
     firstExisting([
-      manualPath("npm", "npm.cmd"),
+      () => manualPath("npm", "npm.cmd"),
       node ? path.join(path.dirname(node), "npm.cmd") : null,
       path.join(NODE_DIR_DEFAULT, "npm.cmd"),
       process.env.NVM_SYMLINK ? path.join(process.env.NVM_SYMLINK, "npm.cmd") : null,
       path.join(os.homedir(), "scoop", "apps", "nodejs", "current", "npm.cmd"),
       path.join(os.homedir(), "scoop", "apps", "nodejs-lts", "current", "npm.cmd"),
-      whereOnPath("npm.cmd"),
-      whereOnPath("npm"),
+      () => whereOnPath("npm.cmd"),
+      () => whereOnPath("npm"),
     ]) || null;
 
   return _npmPathCache;
